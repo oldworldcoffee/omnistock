@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Plus, Pencil, Trash2, MapPin, Store } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +16,7 @@ const EMPTY = { name: '', type: 'location', business_name: '', address: '', phon
 export default function Locations() {
   const { user, canAccessLocation, companyId } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const isMobile = useIsMobile();
   const [locations, setLocations] = useState([]);
   const [dialog, setDialog] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -30,8 +32,42 @@ export default function Locations() {
 
   const save = async () => {
     setSaving(true);
-    if (editing) await base44.entities.Location.update(editing.id, form);
-    else await base44.entities.Location.create({ ...form, company_id: companyId });
+    if (editing) {
+      await base44.entities.Location.update(editing.id, form);
+      // If type changed to commissary and there's no vendor yet, create one
+      if (form.type === 'commissary' && editing.type !== 'commissary') {
+        const existing = await base44.entities.Vendor.filter({ commissioned_location_id: editing.id });
+        if (existing.length === 0) {
+          await base44.entities.Vendor.create({
+            company_id: companyId,
+            name: form.name,
+            is_commissary: true,
+            commissioned_location_id: editing.id,
+            order_type: 'no_orders',
+            is_active: true,
+            address: form.address || '',
+            phone: form.phone || '',
+            email: form.email || '',
+          });
+        }
+      }
+    } else {
+      const loc = await base44.entities.Location.create({ ...form, company_id: companyId });
+      // Auto-create a vendor for commissary locations
+      if (form.type === 'commissary') {
+        await base44.entities.Vendor.create({
+          company_id: companyId,
+          name: form.name,
+          is_commissary: true,
+          commissioned_location_id: loc.id,
+          order_type: 'no_orders',
+          is_active: true,
+          address: form.address || '',
+          phone: form.phone || '',
+          email: form.email || '',
+        });
+      }
+    }
     await load();
     setDialog(false);
     setSaving(false);
@@ -44,7 +80,7 @@ export default function Locations() {
   };
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Locations"
         subtitle="Manage your stores, restaurants, and commissary"

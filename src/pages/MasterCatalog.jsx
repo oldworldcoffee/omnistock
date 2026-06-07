@@ -1,19 +1,46 @@
 import { useState, useEffect, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
-import { Plus, Search, Pencil, Trash2, Package, Store, Star, Upload, Download, FileSpreadsheet, FileText, CheckSquare, Square, Archive, Combine, Image, MoreVertical, FileDown } from 'lucide-react';
+import { useIsMobile } from '@/hooks/useIsMobile';
+import { Plus, Search, Pencil, Trash2, Package, Archive, Combine, MoreVertical, FileDown, FileSpreadsheet, FileText, Upload, Download, CheckSquare, Square, FolderOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import PageHeader from '@/components/layout/PageHeader';
 import StatusBadge from '@/components/ui/StatusBadge';
 import ItemEditDialog from '@/components/catalog/ItemEditDialog';
+import SplitOptionsDialog from '@/components/catalog/SplitOptionsDialog';
+import GroupedCatalogRow from '@/components/catalog/GroupedCatalogRow';
+import ProductGroupManager from '@/components/catalog/ProductGroupManager';
+import AssignToGroupDialog from '@/components/catalog/AssignToGroupDialog';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ChevronUp, ChevronDown } from 'lucide-react';
+import { ChevronUp, ChevronDown, GripVertical } from 'lucide-react';
 
-const EMPTY = { name: '', sku: '', category: '', unit_of_measure: '', unit_cost: '', is_commissary_item: false, commissary_price: '', description: '', vendor_id: '', is_active: true, purchase_options: [] };
+const EMPTY = { name: '', sku: '', category: '', unit_of_measure: '', unit_cost: '', is_commissary_item: false, commissary_price: '', description: '', vendor_id: '', is_active: true, purchase_options: [], product_group_id: null, group_sort_order: 0 };
+
+const UOM_TO_BASE = {
+  'fl-oz': { family: 'volume', toBase: 1 },
+  'oz':    { family: 'volume', toBase: 1 },
+  'ml':    { family: 'volume', toBase: 0.033814 },
+  'L':     { family: 'volume', toBase: 33.814 },
+  'Qt':    { family: 'volume', toBase: 32 },
+  'gal':   { family: 'volume', toBase: 128 },
+  'g':     { family: 'weight', toBase: 1 },
+  'gr':    { family: 'weight', toBase: 1 },
+  'kg':    { family: 'weight', toBase: 1000 },
+  'lb':    { family: 'weight', toBase: 453.592 },
+  'EA':    { family: 'count',  toBase: 1 },
+};
+
+const convertPrice = (pricePerFromUOM, fromUOM, toUOM) => {
+  if (!fromUOM || !toUOM || fromUOM === toUOM) return pricePerFromUOM;
+  const from = UOM_TO_BASE[fromUOM];
+  const to   = UOM_TO_BASE[toUOM];
+  if (!from || !to || from.family !== to.family) return null;
+  return pricePerFromUOM / (from.toBase / to.toBase);
+};
 
 export default function MasterCatalog() {
   const [items, setItems] = useState([]);
@@ -31,51 +58,89 @@ export default function MasterCatalog() {
   const [merging, setMerging] = useState(false);
   const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
   const [mergeTargetId, setMergeTargetId] = useState('');
+  const [splitDialogOpen, setSplitDialogOpen] = useState(false);
+  const [splitting, setSplitting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [groupByOpen, setGroupByOpen] = useState(false);
+  const [assignToGroupOpen, setAssignToGroupOpen] = useState(false);
+  const [groupNames, setGroupNames] = useState({});
   const [sortBy, setSortBy] = useState('name');
   const [sortOrder, setSortOrder] = useState('asc');
   const [vendorFilter, setVendorFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
   const fileInputRef = useRef(null);
-  const formRef = useRef(form);
-  useEffect(() => { formRef.current = form; }, [form]);
 
-  const load = () => Promise.all([
-    base44.entities.InventoryItem.list(),
-    base44.entities.Vendor.list(),
-    base44.entities.Location.list(),
-  ]).then(([itms, vends, locs]) => { setItems(itms); setVendors(vends); setLocations(locs); setLoading(false); });
+  const load = async () => {
+    try {
+      const [itms, vends, locs, groups] = await Promise.all([
+        base44.entities.InventoryItem.list(),
+        base44.entities.Vendor.list(),
+        base44.entities.Location.list(),
+        base44.entities.ProductGroup.list(),
+      ]);
+      setItems(itms);
+      setVendors(vends);
+      setLocations(locs);
+      
+      // Create group name lookup map
+      const groupMap = {};
+      groups.forEach(g => {
+        groupMap[g.id] = g.name;
+      });
+      setGroupNames(groupMap);
+      
+      setLoading(false);
+      return itms;
+    } catch (error) {
+      if (error.message?.includes('Rate limit')) {
+        toast.error('Too many requests. Please wait a moment and refresh.');
+      } else {
+        toast.error('Failed to load catalog: ' + error.message);
+      }
+      setLoading(false);
+      return [];
+    }
+  };
 
   useEffect(() => { load(); }, []);
 
   const openNew = () => { setForm(EMPTY); setDialog(true); };
   const openEdit = (item) => { setForm({ ...item, purchase_options: item.purchase_options || [] }); setDialog(true); };
 
-  const save = async () => {
+  const save = async (latestForm) => {
     setSaving(true);
-    const form = formRef.current;
-    const opts = form.purchase_options || [];
-    const hasImage = opts.some(o => o.product_image_url);
-    toast.info(`Saving ${form.name} - ${hasImage ? 'WITH image' : 'NO image'}`);
-    const data = {
-      ...form,
-      unit_cost: parseFloat(form.unit_cost) || 0,
-      commissary_price: parseFloat(form.commissary_price) || 0,
-      purchase_options: opts.map(o => ({
-        ...o,
-        unit_cost: parseFloat(o.unit_cost) || 0,
-        inner_pack_units: parseFloat(o.inner_pack_units) || null,
-        packs_per_case: parseFloat(o.packs_per_case) || null,
-        inner_pack_name: o.inner_pack_name || null,
-      })),
-    };
-    if (form.id) await base44.entities.InventoryItem.update(form.id, data);
-    else await base44.entities.InventoryItem.create(data);
-    await load();
-    setDialog(false);
-    setSaving(false);
-    toast.success('Item saved!');
+    try {
+      const f = latestForm;
+      const opts = f.purchase_options || [];
+      const data = {
+        ...f,
+        unit_cost: parseFloat(f.unit_cost) || 0,
+        commissary_price: parseFloat(f.commissary_price) || 0,
+        purchase_options: opts.map(o => ({
+          ...o,
+          unit_cost: parseFloat(o.unit_cost) || 0,
+          inner_pack_units: parseFloat(o.inner_pack_units) || null,
+          packs_per_case: parseFloat(o.packs_per_case) || null,
+          inner_pack_name: o.inner_pack_name || null,
+          inner_pack_uom: o.inner_pack_uom || null,
+        })),
+      };
+      let savedId = f.id;
+      if (f.id) await base44.entities.InventoryItem.update(f.id, data);
+      else { const created = await base44.entities.InventoryItem.create(data); savedId = created.id; }
+      
+      const freshItems = await load();
+      const freshItem = freshItems?.find(i => i.id === savedId);
+      if (freshItem) setForm({ ...freshItem, purchase_options: freshItem.purchase_options || [] });
+      setDialog(false);
+      toast.success('Item saved!');
+    } catch (err) {
+      toast.error('Save failed: ' + err.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const remove = async (id) => {
@@ -91,8 +156,9 @@ export default function MasterCatalog() {
   };
 
   const toggleSelectAll = () => {
-    if (selected.size === filtered.length) setSelected(new Set());
-    else setSelected(new Set(filtered.map(i => i.id)));
+    const allItems = sortedGroups.flatMap(g => g.items);
+    if (selected.size === allItems.length) setSelected(new Set());
+    else setSelected(new Set(allItems.map(i => i.id)));
   };
 
   const bulkArchive = async () => {
@@ -147,7 +213,7 @@ export default function MasterCatalog() {
         keep_id: mergeTargetId 
       });
       if (result.data?.success) {
-        toast.success(`Merged! Kept "${result.data.kept_name}", removed "${result.data.removed_name}".`);
+        toast.success(`Merged! Kept "${result.data.kept_name}" with purchase options combined.`);
       } else {
         toast.error(result.data?.error || 'Merge failed');
       }
@@ -159,6 +225,64 @@ export default function MasterCatalog() {
       setMergeDialogOpen(false);
       setSelected(new Set());
       setMergeTargetId('');
+    }
+  };
+
+  const splitItem = async () => {
+    if (selected.size !== 1) {
+      toast.error('Please select exactly 1 item to split');
+      return;
+    }
+    const item = items.find(i => selected.has(i.id));
+    if (!item || (item.purchase_options || []).length < 2) {
+      toast.error('Item must have at least 2 purchase options to split');
+      return;
+    }
+    setSplitDialogOpen(true);
+  };
+
+  const confirmSplit = async (selectedOptions) => {
+    if (!selectedOptions || selectedOptions.length < 2) {
+      toast.error('Select at least 2 purchase options to split');
+      return;
+    }
+    setSplitting(true);
+    try {
+      const item = items.find(i => selected.has(i.id));
+      const opts = item.purchase_options || [];
+      const selectedOpts = opts.filter((_, idx) => selectedOptions.includes(idx));
+      
+      for (let i = 0; i < selectedOpts.length; i++) {
+        const opt = selectedOpts[i];
+        const newItem = {
+          ...item,
+          name: `${item.name} (${opt.vendor_name || 'Option ' + (i + 1)})`,
+          purchase_options: [opt],
+          vendor_id: opt.vendor_id,
+          unit_cost: parseFloat(opt.unit_cost) || 0,
+        };
+        await base44.entities.InventoryItem.create(newItem);
+      }
+      
+      const remainingOpts = opts.filter((_, idx) => !selectedOptions.includes(idx));
+      if (remainingOpts.length > 0) {
+        await base44.entities.InventoryItem.update(item.id, {
+          purchase_options: remainingOpts,
+          vendor_id: remainingOpts[0]?.vendor_id || '',
+          unit_cost: parseFloat(remainingOpts[0]?.unit_cost) || 0,
+        });
+      } else {
+        await base44.entities.InventoryItem.delete(item.id);
+      }
+      
+      toast.success(`Split into ${selectedOpts.length} separate items`);
+      await load();
+      setSplitDialogOpen(false);
+      setSelected(new Set());
+    } catch (error) {
+      toast.error('Split failed: ' + error.message);
+    } finally {
+      setSplitting(false);
     }
   };
 
@@ -176,6 +300,28 @@ export default function MasterCatalog() {
     }
   };
 
+  const handleReorderGroupItems = async (groupId, sourceIndex, destinationIndex) => {
+    const group = sortedGroups.find(g => g.groupId === groupId);
+    if (!group) return;
+    
+    const items = [...group.items];
+    const [removed] = items.splice(sourceIndex, 1);
+    items.splice(destinationIndex, 0, removed);
+    
+    // Update group_sort_order for all items in the group
+    const updates = items.map((item, idx) => ({
+      id: item.id,
+      data: { group_sort_order: idx }
+    }));
+    
+    await Promise.all(
+      updates.map(({ id, data }) => base44.entities.InventoryItem.update(id, data))
+    );
+    
+    await load();
+    toast.success('Items reordered');
+  };
+
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -186,12 +332,7 @@ export default function MasterCatalog() {
       const result = await base44.functions.invoke('importCatalog', { file_url });
       
       if (result.data.success) {
-        const { items: itemResults, vendors: vendorResults } = result.data.results;
-        toast.success(`Import complete! Items: ${itemResults.created} created, ${itemResults.updated} updated. Vendors: ${vendorResults.created} created, ${vendorResults.updated} updated.`);
-        if (itemResults.errors.length > 0 || vendorResults.errors.length > 0) {
-          toast.warning(`${itemResults.errors.length + vendorResults.errors.length} rows had errors`);
-          console.error('Import errors:', [...itemResults.errors, ...vendorResults.errors]);
-        }
+        toast.success(`Import complete!`);
         await load();
       }
     } catch (error) {
@@ -205,7 +346,8 @@ export default function MasterCatalog() {
   const exportCatalog = async (format) => {
     setExporting(true);
     try {
-      const response = await base44.functions.invoke('exportCatalog', { format, items: filtered });
+      const allItems = sortedGroups.flatMap(g => g.items);
+      const response = await base44.functions.invoke('exportCatalog', { format, items: allItems });
       const blob = new Blob([response.data], { type: format === 'pdf' ? 'application/pdf' : 'text/csv' });
       const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -221,7 +363,8 @@ export default function MasterCatalog() {
     }
   };
 
-  const filtered = items.filter(i => {
+  // Group items by product_group_id
+  const itemsWithGroups = items.filter(i => {
     const matchesSearch = i.name?.toLowerCase().includes(search.toLowerCase()) ||
       i.category?.toLowerCase().includes(search.toLowerCase()) ||
       i.sku?.toLowerCase().includes(search.toLowerCase());
@@ -229,19 +372,54 @@ export default function MasterCatalog() {
     const matchesVendor = vendorFilter === 'all' || (i.purchase_options || []).some(o => o.vendor_name === vendorFilter);
     const matchesCategory = categoryFilter === 'all' || i.category === categoryFilter;
     return matchesSearch && matchesArchive && matchesVendor && matchesCategory;
-  }).sort((a, b) => {
+  });
+
+  const groupedItems = {};
+  itemsWithGroups.forEach(item => {
+    if (item.product_group_id) {
+      if (!groupedItems[item.product_group_id]) {
+        groupedItems[item.product_group_id] = { groupId: item.product_group_id, items: [], sortBase: item.name };
+      }
+      groupedItems[item.product_group_id].items.push(item);
+    } else {
+      groupedItems[`standalone-${item.id}`] = { groupId: null, items: [item], sortBase: item.name };
+    }
+  });
+
+  const sortedGroups = Object.values(groupedItems).sort((a, b) => {
     let comparison = 0;
     if (sortBy === 'name') {
-      comparison = (a.name || '').localeCompare(b.name || '');
+      comparison = (a.sortBase || '').localeCompare(b.sortBase || '');
     } else if (sortBy === 'category') {
-      comparison = (a.category || '').localeCompare(b.category || '');
+      const aCat = a.items[0]?.category || '';
+      const bCat = b.items[0]?.category || '';
+      comparison = aCat.localeCompare(bCat);
     } else if (sortBy === 'vendor') {
-      const aVendor = (a.purchase_options || []).find(o => o.is_preferred)?.vendor_name || (a.purchase_options || [])[0]?.vendor_name || '';
-      const bVendor = (b.purchase_options || []).find(o => o.is_preferred)?.vendor_name || (b.purchase_options || [])[0]?.vendor_name || '';
+      const aVendor = (a.items[0]?.purchase_options || []).find(o => o.is_preferred)?.vendor_name || (a.items[0]?.purchase_options || [])[0]?.vendor_name || '';
+      const bVendor = (b.items[0]?.purchase_options || []).find(o => o.is_preferred)?.vendor_name || (b.items[0]?.purchase_options || [])[0]?.vendor_name || '';
       comparison = aVendor.localeCompare(bVendor);
     }
     return sortOrder === 'asc' ? comparison : -comparison;
   });
+
+  sortedGroups.forEach(group => {
+    group.items.sort((a, b) => {
+      if (a.group_sort_order !== b.group_sort_order) {
+        return (a.group_sort_order || 0) - (b.group_sort_order || 0);
+      }
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  });
+
+  const toggleGroup = (groupId) => {
+    const next = new Set(expandedGroups);
+    if (next.has(groupId)) {
+      next.delete(groupId);
+    } else {
+      next.add(groupId);
+    }
+    setExpandedGroups(next);
+  };
 
   const categories = [...new Set(items.map(i => i.category).filter(Boolean))];
   const uniqueVendors = [...new Set(items.flatMap(i => (i.purchase_options || []).map(o => o.vendor_name).filter(Boolean)))].sort();
@@ -257,20 +435,45 @@ export default function MasterCatalog() {
     return opts.reduce((a, b) => parseFloat(a.unit_cost) < parseFloat(b.unit_cost) ? a : b);
   };
 
-  const getPricePerUOM = (opt) => {
+  const getPricePerUOM = (opt, itemUOM) => {
     const cost = parseFloat(opt?.unit_cost || 0);
     if (!cost) return null;
+    const orderingUOM = opt?.unit_of_measure || itemUOM;
+    const packUOM = opt?.inner_pack_uom || itemUOM;
     const innerUnits = parseFloat(opt?.inner_pack_units || 0);
     const packsPerCase = parseFloat(opt?.packs_per_case || 0);
-    if (!innerUnits || !packsPerCase) return null;
-    const totalUnits = innerUnits * packsPerCase;
-    const ppu = cost / totalUnits;
-    // Show 4 decimals only if needed, otherwise fewer
-    return ppu < 0.01 ? ppu.toFixed(4) : ppu < 1 ? ppu.toFixed(3) : ppu.toFixed(2);
+    const packName = opt?.inner_pack_name || '';
+
+    let pricePerPackUnit;
+    if (orderingUOM === 'Case' && innerUnits > 0 && packsPerCase > 0) {
+      pricePerPackUnit = cost / (innerUnits * packsPerCase);
+    } else if (packName && orderingUOM === packName && innerUnits > 0) {
+      pricePerPackUnit = cost / innerUnits;
+    } else if (innerUnits > 0 && packsPerCase > 0) {
+      pricePerPackUnit = cost / (innerUnits * packsPerCase);
+    } else {
+      pricePerPackUnit = null;
+    }
+
+    const fmt = (v) => v < 0.01 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v.toFixed(2);
+
+    if (pricePerPackUnit !== null) {
+      if (packUOM === itemUOM) return { price: fmt(pricePerPackUnit), uom: itemUOM };
+      const converted = convertPrice(pricePerPackUnit, packUOM, itemUOM);
+      if (converted === null) return { price: fmt(pricePerPackUnit), uom: packUOM };
+      return { price: fmt(converted), uom: itemUOM };
+    }
+
+    if (orderingUOM === itemUOM) return { price: fmt(cost), uom: itemUOM };
+    const converted = convertPrice(cost, orderingUOM, itemUOM);
+    if (converted === null) return { price: fmt(cost), uom: orderingUOM };
+    return { price: fmt(converted), uom: itemUOM };
   };
 
+  const isMobile = useIsMobile();
+
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Master Catalog"
         subtitle="All inventory items across your operation"
@@ -305,6 +508,9 @@ export default function MasterCatalog() {
             <Button variant="outline" onClick={() => setShowArchived(!showArchived)}>
               <Archive className="w-4 h-4 mr-1" />{showArchived ? 'Hide Archived' : 'Show Archived'}
             </Button>
+            <Button variant="outline" onClick={() => setGroupByOpen(true)}>
+              <FolderOpen className="w-4 h-4 mr-1" />Manage Groups
+            </Button>
             <Button onClick={openNew}><Plus className="w-4 h-4 mr-1" />Add Item</Button>
             
             {selected.size > 0 && (
@@ -327,12 +533,19 @@ export default function MasterCatalog() {
                       Archive
                     </DropdownMenuItem>
                   )}
+                  <DropdownMenuItem onClick={splitItem} disabled={selected.size !== 1}>
+                    <Package className="w-4 h-4 mr-2" />
+                    Split Order Options
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={mergeDuplicates} disabled={selected.size !== 2}>
                     <Combine className="w-4 h-4 mr-2" />
                     Merge Duplicates
-                    {selected.size !== 2 && <span className="text-xs text-muted-foreground ml-auto">(select 2)</span>}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => setAssignToGroupOpen(true)}>
+                    <Package className="w-4 h-4 mr-2" />
+                    Assign to Group
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={bulkDelete} className="text-destructive focus:text-destructive">
                     <Trash2 className="w-4 h-4 mr-2" />
                     Delete
@@ -381,6 +594,58 @@ export default function MasterCatalog() {
             <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             <span className="text-sm text-muted-foreground">Importing catalog...</span>
           </div>
+        ) : isMobile ? (
+          <div className="divide-y divide-border">
+            {sortedGroups.length === 0 ? (
+              <p className="px-4 py-8 text-center text-muted-foreground text-sm">No items found.</p>
+            ) : sortedGroups.map(group => {
+              const isGroup = group.groupId !== null && group.items.length > 1;
+              const firstItem = group.items[0];
+              const preferred = getPreferredOption(firstItem);
+              const pricePerUOM = preferred ? getPricePerUOM(preferred, firstItem.unit_of_measure) : null;
+              const groupVendors = [...new Set(group.items.flatMap(i => (i.purchase_options || []).map(o => o.vendor_name).filter(Boolean)))];
+              return (
+                <div key={group.groupId || firstItem.id} className="p-4 space-y-2">
+                  {isGroup && (
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{groupNames[group.groupId] || 'Group'} ({group.items.length} items)</p>
+                  )}
+                  {group.items.map(item => {
+                    const pref = getPreferredOption(item);
+                    const ppu = pref ? getPricePerUOM(pref, item.unit_of_measure) : null;
+                    const isSelected = selected.has(item.id);
+                    return (
+                      <div key={item.id} className={`bg-card border rounded-xl p-4 ${isSelected ? 'border-primary' : 'border-border'}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-3 flex-1">
+                            <button onClick={() => toggleSelect(item.id)} className="mt-0.5">
+                              {isSelected ? <CheckSquare className="w-4 h-4 text-primary" /> : <Square className="w-4 h-4 text-muted-foreground" />}
+                            </button>
+                            <div className="flex-1">
+                              <p className="font-semibold text-sm">{item.name}</p>
+                              <p className="text-xs text-muted-foreground">{item.category || '—'} · {item.unit_of_measure}</p>
+                              {groupVendors.length > 0 && <p className="text-xs text-muted-foreground mt-0.5">{groupVendors.join(', ')}</p>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <StatusBadge status={item.is_active ? 'active' : 'inactive'} />
+                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(item)}><Pencil className="w-3.5 h-3.5" /></Button>
+                          </div>
+                        </div>
+                        {(pref || item.is_commissary_item) && (
+                          <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-border text-xs">
+                            {pref && <div><p className="text-muted-foreground">Best Price</p><p className="font-medium mt-0.5">${parseFloat(pref.unit_cost || 0).toFixed(2)}</p></div>}
+                            {ppu && <div><p className="text-muted-foreground">$/UOM</p><p className="font-medium mt-0.5">${ppu.price}/{ppu.uom}</p></div>}
+                            {item.is_commissary_item && <div><p className="text-muted-foreground">Commissary</p><p className="font-medium mt-0.5">${parseFloat(item.commissary_price || 0).toFixed(2)}</p></div>}
+                            <div><p className="text-muted-foreground">Options</p><p className="font-medium mt-0.5">{(item.purchase_options || []).length}</p></div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -388,32 +653,17 @@ export default function MasterCatalog() {
                 <tr>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide w-10">
                     <button onClick={toggleSelectAll} className="hover:opacity-70">
-                      {selected.size === filtered.length && filtered.length > 0 ? (
-                        <CheckSquare className="w-4 h-4" />
-                      ) : (
-                        <Square className="w-4 h-4" />
-                      )}
+                      {selected.size > 0 ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
                     </button>
                   </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide cursor-pointer hover:bg-muted/30" onClick={() => { setSortBy('name'); setSortOrder(sortBy === 'name' && sortOrder === 'asc' ? 'desc' : 'asc'); }}>
-                    <div className="flex items-center gap-1">
-                      Item Name
-                      {sortBy === 'name' && (sortOrder === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                    </div>
+                    <div className="flex items-center gap-1">Item Name {sortBy === 'name' && (sortOrder === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}</div>
                   </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide cursor-pointer hover:bg-muted/30" onClick={() => { setSortBy('category'); setSortOrder(sortBy === 'category' && sortOrder === 'asc' ? 'desc' : 'asc'); }}>
-                    <div className="flex items-center gap-1">
-                      Category
-                      {sortBy === 'category' && (sortOrder === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                    </div>
+                    <div className="flex items-center gap-1">Category {sortBy === 'category' && (sortOrder === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}</div>
                   </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">UOM</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide cursor-pointer hover:bg-muted/30" onClick={() => { setSortBy('vendor'); setSortOrder(sortBy === 'vendor' && sortOrder === 'asc' ? 'desc' : 'asc'); }}>
-                    <div className="flex items-center gap-1">
-                      Purchase Options
-                      {sortBy === 'vendor' && (sortOrder === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                    </div>
-                  </th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Purchase Options</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Best Price</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">$/UOM</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Commissary</th>
@@ -422,114 +672,35 @@ export default function MasterCatalog() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {filtered.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">No items found. Add your first item to get started.</td></tr>
-                ) : filtered.map(item => {
-                  const opts = item.purchase_options || [];
-                  const preferred = getPreferredOption(item);
-                  const cheapest = getCheapestOption(item);
+                {sortedGroups.length === 0 ? (
+                  <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">No items found.</td></tr>
+                ) : sortedGroups.map(group => {
+                  const isGroup = group.groupId !== null && group.items.length > 1;
+                  const isExpanded = expandedGroups.has(group.groupId);
+                  const firstItem = group.items[0];
+                  const allUnitCosts = group.items.map(i => parseFloat(i.unit_cost) || 0).filter(c => c > 0);
+                  const groupVendors = [...new Set(group.items.flatMap(i => (i.purchase_options || []).map(o => o.vendor_name).filter(Boolean)))];
                   return (
-                    <tr key={item.id} className={`hover:bg-muted/30 transition-colors ${!item.is_active ? 'opacity-50' : ''}`}>
-                      <td className="px-4 py-3">
-                        <button onClick={() => toggleSelect(item.id)} className="hover:opacity-70">
-                          {selected.has(item.id) ? (
-                            <CheckSquare className="w-4 h-4" />
-                          ) : (
-                            <Square className="w-4 h-4" />
-                          )}
-                        </button>
-                      </td>
-                      <td className="px-4 py-3 font-medium text-foreground">
-                        <div className="flex items-center gap-2">
-                          {(() => {
-                            const img = item.purchase_options?.find(o => o.product_image_url)?.product_image_url;
-                            return img ? (
-                              <img src={img} alt="" className="w-10 h-10 object-contain rounded border bg-white" onError={(e) => e.target.style.display = 'none'} />
-                            ) : (
-                              <div className="w-10 h-10 flex items-center justify-center bg-muted rounded border">
-                                <Image className="w-4 h-4 text-muted-foreground" />
-                              </div>
-                            );
-                          })()}
-                          <div>
-                            <div>{item.name}</div>
-                            {item.purchase_options?.find(o => o.product_image_url) && (
-                              <div className="text-xs text-muted-foreground">
-                                <a href={item.purchase_options.find(o => o.product_image_url).product_url} target="_blank" rel="noopener noreferrer" className="hover:text-primary">
-                                  🔗 {item.purchase_options.find(o => o.product_image_url).vendor_name}
-                                </a>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">{item.category || '—'}</td>
-                      <td className="px-4 py-3">{item.unit_of_measure}</td>
-                      <td className="px-4 py-3">
-                        {opts.length === 0 ? (
-                          <span className="text-muted-foreground text-xs italic">None set</span>
-                        ) : (
-                          <div className="flex flex-wrap gap-1">
-                            {opts.map((o, i) => (
-                              <span key={i} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${o.is_preferred ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
-                                {o.is_preferred && <Star className="w-2.5 h-2.5 fill-current" />}
-                                {o.vendor_name || 'Vendor'}
-                                {o.unit_cost ? ` $${parseFloat(o.unit_cost).toFixed(2)}` : ''}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        {cheapest ? (
-                          <div>
-                            <span className="font-semibold text-green-600">${parseFloat(cheapest.unit_cost).toFixed(2)}</span>
-                            <span className="text-xs text-muted-foreground ml-1">via {cheapest.vendor_name}</span>
-                          </div>
-                        ) : preferred ? (
-                          <span className="font-medium">${parseFloat(preferred.unit_cost || item.unit_cost || 0).toFixed(2)}</span>
-                        ) : (
-                          <span className="text-muted-foreground">${(item.unit_cost || 0).toFixed(2)}</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        {(() => {
-                          // Try preferred first, then all options to find one with pack breakdown
-                          const optWithPack = [preferred, ...opts].find(o => o && parseFloat(o?.inner_pack_units) > 0 && parseFloat(o?.packs_per_case) > 0);
-                          const ppu = getPricePerUOM(optWithPack);
-                          return ppu ? (
-                            <span className="text-xs text-muted-foreground">${ppu}<span className="text-muted-foreground/60">/{item.unit_of_measure}</span></span>
-                          ) : <span className="text-muted-foreground text-xs">—</span>;
-                        })()}
-                      </td>
-                      <td className="px-4 py-3">
-                        {item.is_commissary_item ? (
-                          <div className="flex flex-col gap-1">
-                            <div className="flex items-center gap-1 text-purple-600">
-                              <Store className="w-3 h-3" />
-                              <span className="text-xs font-medium">${(item.commissary_price || 0).toFixed(2)}</span>
-                            </div>
-                            {item.commissary_vendor_id && (
-                              <span className="text-xs text-muted-foreground">
-                                via {vendors.find(v => v.id === item.commissary_vendor_id)?.name || 'Unknown'}
-                              </span>
-                            )}
-                          </div>
-                        ) : <span className="text-muted-foreground text-xs">—</span>}
-                      </td>
-                      <td className="px-4 py-3"><StatusBadge status={item.is_active ? 'active' : 'inactive'} /></td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1">
-                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(item)}>
-                            <Pencil className="w-3.5 h-3.5" />
-                          </Button>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => remove(item.id)}>
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
-                        </div>
-                      </td>
-
-                    </tr>
+                    <GroupedCatalogRow
+                      key={group.groupId || firstItem.id}
+                      group={group}
+                      isGroup={isGroup}
+                      isExpanded={isExpanded}
+                      firstItem={firstItem}
+                      selected={selected}
+                      uniqueVendors={groupVendors}
+                      allUnitCosts={allUnitCosts}
+                      onToggleGroup={() => toggleGroup(group.groupId)}
+                      onToggleSelect={toggleSelect}
+                      onEdit={openEdit}
+                      onDelete={remove}
+                      onRefresh={load}
+                      onReorderGroupItems={handleReorderGroupItems}
+                      getPreferredOption={getPreferredOption}
+                      getCheapestOption={getCheapestOption}
+                      getPricePerUOM={getPricePerUOM}
+                      groupNames={groupNames}
+                    />
                   );
                 })}
               </tbody>
@@ -541,8 +712,7 @@ export default function MasterCatalog() {
       <ItemEditDialog
         open={dialog}
         onOpenChange={setDialog}
-        form={form}
-        setForm={setForm}
+        initialForm={form}
         onSave={save}
         saving={saving}
         vendors={vendors}
@@ -550,39 +720,22 @@ export default function MasterCatalog() {
         categories={categories}
       />
 
-      {/* Merge dialog */}
       <Dialog open={mergeDialogOpen} onOpenChange={setMergeDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Merge Duplicate Items</DialogTitle>
-            <DialogDescription>
-              Select which item to keep. All purchase options, order history, and associations will be combined.
-            </DialogDescription>
+            <DialogDescription>Select which item to keep. All purchase options will be combined.</DialogDescription>
           </DialogHeader>
           <div className="py-4 space-y-3">
             {Array.from(selected).map(id => {
               const item = items.find(i => i.id === id);
               if (!item) return null;
               return (
-                <label
-                  key={id}
-                  className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${
-                    mergeTargetId === id ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="merge_target"
-                    value={id}
-                    checked={mergeTargetId === id}
-                    onChange={() => setMergeTargetId(id)}
-                    className="w-4 h-4"
-                  />
+                <label key={id} className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer ${mergeTargetId === id ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted'}`}>
+                  <input type="radio" name="merge_target" value={id} checked={mergeTargetId === id} onChange={() => setMergeTargetId(id)} className="w-4 h-4" />
                   <div className="flex-1">
                     <p className="font-medium text-foreground">{item.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {item.purchase_options?.length || 0} purchase options • {(item.purchase_options || []).filter(o => o.product_image_url).length} with images
-                    </p>
+                    <p className="text-sm text-muted-foreground">{item.purchase_options?.length || 0} purchase options</p>
                   </div>
                 </label>
               );
@@ -590,41 +743,63 @@ export default function MasterCatalog() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => { setMergeDialogOpen(false); setMergeTargetId(''); }}>Cancel</Button>
-            <Button onClick={confirmMerge} disabled={merging || !mergeTargetId}>
-              {merging ? 'Merging...' : 'Merge Items'}
-            </Button>
+            <Button onClick={confirmMerge} disabled={merging || !mergeTargetId}>{merging ? 'Merging...' : 'Merge Items'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete confirmation dialog */}
+      <Dialog open={splitDialogOpen} onOpenChange={setSplitDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Split Order Options</DialogTitle>
+            <DialogDescription>Select which purchase options to split into separate items.</DialogDescription>
+          </DialogHeader>
+          <SplitOptionsDialog
+            item={items.find(i => selected.has(i.id))}
+            onCancel={() => setSplitDialogOpen(false)}
+            onConfirm={confirmSplit}
+            splitting={splitting}
+          />
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Permanently Delete Items</DialogTitle>
-            <DialogDescription>
-              This action cannot be undone. You are about to delete {selected.size} items.
-              Type "delete" to confirm.
-            </DialogDescription>
+            <DialogDescription>This action cannot be undone. Type "delete" to confirm deleting {selected.size} items.</DialogDescription>
           </DialogHeader>
           <div className="py-4">
             <Label htmlFor="confirm-delete">Type "delete"</Label>
-            <Input
-              id="confirm-delete"
-              value={deleteConfirmText}
-              onChange={(e) => setDeleteConfirmText(e.target.value)}
-              placeholder="delete"
-              className="mt-2"
-            />
+            <Input id="confirm-delete" value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="delete" className="mt-2" />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>Cancel</Button>
-            <Button variant="destructive" onClick={confirmBulkDelete} disabled={deleteConfirmText !== 'delete'}>
-              Delete
-            </Button>
+            <Button variant="destructive" onClick={confirmBulkDelete} disabled={deleteConfirmText !== 'delete'}>Delete</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ProductGroupManager
+        open={groupByOpen}
+        onOpenChange={setGroupByOpen}
+      />
+
+      <AssignToGroupDialog
+        open={assignToGroupOpen}
+        onOpenChange={setAssignToGroupOpen}
+        itemIds={Array.from(selected)}
+        itemNames={Array.from(selected).map(id => items.find(i => i.id === id)?.name).filter(Boolean)}
+      />
+
+      {/* Hidden file input for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,.xlsx,.xls"
+        onChange={handleFileUpload}
+        className="hidden"
+      />
     </div>
   );
 }

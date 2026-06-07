@@ -32,9 +32,11 @@ const entityNames = [
   'InventorySnapshot',
   'Invoice',
   'ItemStorageArea',
+  'ItemVariant',
   'Location',
   'LocationInventory',
   'Order',
+  'ProductGroup',
   'StorageArea',
   'Transfer',
   'UserPermission',
@@ -48,9 +50,11 @@ const companyScopedEntities = new Set([
   'InventoryItem',
   'InventorySnapshot',
   'Invoice',
+  'ItemVariant',
   'Location',
   'LocationInventory',
   'Order',
+  'ProductGroup',
   'Transfer',
   'UserPermission',
   'Vendor'
@@ -854,17 +858,104 @@ const functionHandlers = {
     return { data: { success: true, kept_name: keep.name, removed_name: remove.name } };
   },
 
+  manageProductGroups: async ({ db, user, body }) => {
+    const action = body.action;
+    const companyId = companyIdForUser(db, user);
+
+    if (action === 'create') {
+      const group = createRecord(db, 'ProductGroup', {
+        company_id: companyId,
+        name: String(body.name || '').trim(),
+        description: body.description || ''
+      }, user);
+      return { data: { success: true, group }, group };
+    }
+
+    if (action === 'update') {
+      let group = getEntityRecord(db, 'ProductGroup', body.groupId);
+      let migrated = false;
+      if (!group) {
+        group = createRecord(db, 'ProductGroup', {
+          company_id: companyId,
+          name: String(body.name || '').trim(),
+          description: body.description || ''
+        }, user);
+        migrated = true;
+      } else {
+        group = updateRecord(db, 'ProductGroup', group.id, {
+          name: String(body.name || group.name || '').trim(),
+          description: body.description ?? group.description ?? ''
+        });
+      }
+      return { data: { success: true, group, migrated }, group };
+    }
+
+    if (action === 'delete') {
+      db.entities.InventoryItem
+        .filter((item) => item.product_group_id === body.groupId)
+        .forEach((item) => updateRecord(db, 'InventoryItem', item.id, { product_group_id: null, group_sort_order: 0 }));
+      deleteRecord(db, 'ProductGroup', body.groupId);
+      return { data: { success: true } };
+    }
+
+    if (action === 'add_items') {
+      const itemIds = Array.isArray(body.itemIds) ? body.itemIds : [];
+      itemIds.forEach((itemId, index) => {
+        updateRecord(db, 'InventoryItem', itemId, {
+          product_group_id: body.groupId,
+          group_sort_order: index
+        });
+      });
+      return { data: { success: true, updated: itemIds.length } };
+    }
+
+    throw new Error(`Unknown product group action "${action}"`);
+  },
+
   sendVendorOrderEmail: async ({ db, body }) => {
+    if (body.orderId) {
+      const order = getEntityRecord(db, 'Order', body.orderId);
+      if (order) {
+        const token = order.vendor_public_token || crypto.randomBytes(24).toString('hex');
+        const appUrl = String(body.appUrl || '').replace(/\/$/, '');
+        const orderUrl = appUrl ? `${appUrl}/vendor/order?token=${token}` : `/vendor/order?token=${token}`;
+        body.htmlBody = String(body.htmlBody || '').replaceAll('TRACKING_PLACEHOLDER_CONFIRM', orderUrl);
+        updateRecord(db, 'Order', order.id, {
+          vendor_public_token: token,
+          vendor_public_token_created_at: order.vendor_public_token_created_at || nowIso(),
+          vendor_public_token_expires_at: order.vendor_public_token_expires_at || new Date(Date.now() + 1000 * 60 * 60 * 24 * 90).toISOString()
+        });
+      }
+    }
     const email = await sendEmail(db, body);
     if (body.orderId) {
       updateRecord(db, 'Order', body.orderId, {
         status: 'sent',
         sent_at: nowIso(),
+        email_sent_at: nowIso(),
         email_status: email.status,
         email_log_id: email.id
       });
     }
     return { data: { success: true, email } };
+  },
+
+  validateVendorToken: async ({ db, body }) => {
+    const token = String(body.token || '').trim();
+    if (!token) return { data: { error: 'Missing order token' } };
+    const order = db.entities.Order.find((row) => row.vendor_public_token === token);
+    if (!order) return { data: { error: 'Invalid or expired order link' } };
+    if (order.vendor_public_token_expires_at && new Date(order.vendor_public_token_expires_at).getTime() < Date.now()) {
+      return { data: { error: 'Invalid or expired order link' } };
+    }
+    updateRecord(db, 'Order', order.id, {
+      status: order.status === 'sent' ? 'viewed' : order.status,
+      viewed_at: order.viewed_at || nowIso()
+    });
+    const freshOrder = getEntityRecord(db, 'Order', order.id);
+    const location = freshOrder?.location_id ? getEntityRecord(db, 'Location', freshOrder.location_id) : null;
+    const settings = db.entities.CompanySettings.find((row) => !freshOrder?.company_id || row.company_id === freshOrder.company_id) || db.entities.CompanySettings[0] || null;
+    return { data: { success: true, order: freshOrder, location, settings } };
   },
 
   cancelVendorOrderEmail: async ({ db, body }) => {
@@ -947,6 +1038,49 @@ const functionHandlers = {
         results
       }
     };
+  },
+
+  submitInventoryCount: async ({ db, user, body }) => {
+    const itemQtyMap = body.itemQtyMap || {};
+    const locationId = body.locationId || body.location_id;
+    const companyId = body.companyId || companyIdForUser(db, user);
+    let updated = 0;
+    let created = 0;
+
+    for (const [itemId, rawQuantity] of Object.entries(itemQtyMap)) {
+      const quantity = Number(rawQuantity || 0);
+      const existingId = body.locInvMap?.[itemId];
+      const existing = existingId
+        ? getEntityRecord(db, 'LocationInventory', existingId)
+        : db.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
+      const data = {
+        company_id: companyId,
+        location_id: locationId,
+        item_id: itemId,
+        on_hand_quantity: quantity,
+        par_level: Number(existing?.par_level || 0),
+        reorder_point: Number(existing?.reorder_point || 0),
+        last_counted_at: nowIso()
+      };
+
+      if (existing) {
+        updateRecord(db, 'LocationInventory', existing.id, data);
+        updated += 1;
+      } else {
+        createRecord(db, 'LocationInventory', data, user);
+        created += 1;
+      }
+    }
+
+    if (body.countId) {
+      updateRecord(db, 'InventoryCount', body.countId, {
+        status: 'submitted',
+        submitted_at: nowIso(),
+        submitted_by: user?.email || 'system'
+      });
+    }
+
+    return { data: { success: true, updated, created } };
   },
 
   fulfillCommissaryOrder: async ({ db, user, body }) => {
@@ -1266,6 +1400,16 @@ const handleEntities = async (req, res, pathname, searchParams) => {
     return sendJson(res, 200, record);
   }
 
+  if (req.method === 'POST' && id === 'bulk') {
+    const rows = await readJsonBody(req);
+    if (!Array.isArray(rows)) throw new Error('Bulk create expects an array');
+    const records = await withDb(async (writeDb) => {
+      const writeUser = currentUser(writeDb, req);
+      return rows.map((row) => createRecord(writeDb, entityName, row, writeUser));
+    });
+    return sendJson(res, 200, records);
+  }
+
   if (req.method === 'POST' && !id) {
     const body = await readJsonBody(req);
     const record = await withDb(async (writeDb) => createRecord(writeDb, entityName, body, currentUser(writeDb, req)));
@@ -1294,10 +1438,11 @@ const handleFunctions = async (req, res, pathname) => {
   const functionName = match[1];
   const handler = functionHandlers[functionName];
   if (!handler) return sendJson(res, 404, { error: `Function "${functionName}" is not implemented locally` });
+  const publicFunctions = new Set(['validateVendorToken']);
   const body = await readJsonBody(req);
   const result = await withDb(async (db) => {
     const user = currentUser(db, req);
-    if (!user) throw new Error('Unauthorized');
+    if (!user && !publicFunctions.has(functionName)) throw new Error('Unauthorized');
     return handler({ db, user, body });
   });
   return sendJson(res, 200, result);

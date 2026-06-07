@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
-import { Search, Pencil, AlertTriangle, CheckCircle, Plus, Trash2, MapPin, GripVertical, ChevronRight, X, ArrowUpDown, ArrowDownAZ, TrendingUp, Calendar } from 'lucide-react';
+import { Search, Pencil, AlertTriangle, CheckCircle, Plus, Trash2, MapPin, GripVertical, ChevronRight, X, ArrowUpDown, ArrowDownAZ, TrendingUp, Calendar, RefreshCw } from 'lucide-react';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -28,8 +29,7 @@ export default function LocationStock() {
   const [sortMode, setSortMode] = useState('manual'); // manual, alpha, count
   const [addItemsDialog, setAddItemsDialog] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [snapshotDate, setSnapshotDate] = useState('');
-  const [snapshotData, setSnapshotData] = useState(null);
+
 
   const load = () => Promise.all([
     base44.entities.Location.list(),
@@ -48,30 +48,33 @@ export default function LocationStock() {
     setLoading(false);
   });
 
-  const loadSnapshotData = async (date, locationId) => {
-    if (!date || !locationId) {
-      setSnapshotData(null);
-      return;
-    }
-    const snapshots = await base44.entities.InventorySnapshot.filter({
-      snapshot_date: date,
-      location_id: locationId
-    });
-    setSnapshotData(snapshots);
-  };
+
 
   useEffect(() => { 
     load();
-    // Set default date to today
-    const today = new Date().toISOString().split('T')[0];
-    setSnapshotDate(today);
   }, []);
 
+  // Reload data when page gains focus or becomes visible (e.g., after returning from Inventory Counts)
   useEffect(() => {
-    if (selectedLoc && snapshotDate) {
-      loadSnapshotData(snapshotDate, selectedLoc);
-    }
-  }, [selectedLoc, snapshotDate]);
+    const handleFocus = () => load();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    const handleInventoryUpdate = () => {
+      console.log('Inventory updated event received, reloading...');
+      load();
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('inventory-updated', handleInventoryUpdate);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('inventory-updated', handleInventoryUpdate);
+    };
+  }, []);
+
+
 
   const locAreas = storageAreas.filter(a => a.location_id === selectedLoc).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 
@@ -125,8 +128,8 @@ export default function LocationStock() {
       setItemAreaMappings(prev => prev.filter(m => m.id !== existing.id));
     } else {
       const maxOrder = Math.max(0, ...itemAreaMappings.filter(m => m.storage_area_id === areaId).map(m => m.sort_order || 0));
-      await base44.entities.ItemStorageArea.create({ item_id: itemId, storage_area_id: areaId, sort_order: maxOrder + 1 });
-      await load();
+      const newMapping = await base44.entities.ItemStorageArea.create({ item_id: itemId, storage_area_id: areaId, sort_order: maxOrder + 1 });
+      setItemAreaMappings(prev => [...prev, newMapping]);
     }
   };
 
@@ -189,22 +192,6 @@ export default function LocationStock() {
 
   const getLocInv = (locId) => {
     return items.filter(item => item.is_active).map(item => {
-      // If viewing historical snapshot
-      if (snapshotData) {
-        const snap = snapshotData.find(s => s.item_id === item.id);
-        return { 
-          item, 
-          li: snap ? { 
-            on_hand_quantity: snap.quantity_on_hand || 0, 
-            par_level: 0, 
-            reorder_point: 0,
-            unit_cost: snap.unit_cost || 0
-          } : { on_hand_quantity: 0, par_level: 0, reorder_point: 0, unit_cost: 0 },
-          liId: snap?.id,
-          isSnapshot: true
-        };
-      }
-      // Current data
       const li = locInv.find(l => l.location_id === locId && l.item_id === item.id);
       return { item, li: li || { on_hand_quantity: 0, par_level: 0, reorder_point: 0 }, liId: li?.id };
     });
@@ -212,7 +199,10 @@ export default function LocationStock() {
 
   const openEdit = (row) => {
     setEditRow(row);
-    setEditForm({ par_level: row.li.par_level || 0, reorder_point: row.li.reorder_point || 0 });
+    setEditForm({ 
+      par_level: row?.li?.par_level || 0, 
+      reorder_point: row?.li?.reorder_point || 0 
+    });
   };
 
   const savePar = async () => {
@@ -223,50 +213,57 @@ export default function LocationStock() {
     setEditRow(null);
   };
 
+  // Group items by product_group_id
+  const groupedItems = items.filter(i => i.is_active).reduce((acc, item) => {
+    const groupId = item.product_group_id || `standalone_${item.id}`;
+    if (!acc[groupId]) {
+      acc[groupId] = {
+        group_id: groupId,
+        name: item.product_group_id ? item.purchase_options?.[0]?.product_name || item.name : item.name,
+        is_group: !!item.product_group_id,
+        items: []
+      };
+    }
+    acc[groupId].items.push(item);
+    return acc;
+  }, {});
+
   const rows = getLocInv(selectedLoc).filter(r =>
     r.item.name?.toLowerCase().includes(search.toLowerCase()) ||
     r.item.category?.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Calculate value: on_hand_quantity is in base units (EA), unit_cost is per case
-  // So value = (on_hand / units_per_case) * unit_cost_per_case
-  const getItemValue = (item, onHand, snapshotUnitCost) => {
-    // If viewing snapshot, use pre-calculated unit cost
-    if (snapshotUnitCost !== undefined) {
-      return onHand * snapshotUnitCost;
-    }
+  const getItemValue = (item, onHand) => {
     const preferred = item.purchase_options?.find(o => o.is_preferred) || item.purchase_options?.[0];
     const packUnits = preferred?.inner_pack_units || item.inner_pack_units || 1;
     const packsPerCase = preferred?.packs_per_case || item.packs_per_case;
     const unitCost = preferred?.unit_cost || item.unit_cost || 0;
     if (packsPerCase && packUnits) {
-      // unit_cost is per case; convert on_hand (EA) to cases
       const unitsPerCase = packUnits * packsPerCase;
       return (onHand / unitsPerCase) * unitCost;
     } else if (packUnits && packUnits > 1) {
-      // unit_cost is per inner pack
       return (onHand / packUnits) * unitCost;
     }
-    // unit_cost is per EA
     return onHand * unitCost;
   };
-  const locValue = rows.reduce((sum, r) => sum + getItemValue(r.item, r.li.on_hand_quantity || 0, r.li.unit_cost), 0);
+  const locValue = rows.reduce((sum, r) => sum + getItemValue(r.item, r.li.on_hand_quantity || 0), 0);
+
+  const isMobile = useIsMobile();
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <PageHeader title="Location Stock" subtitle="On-hand quantities, par levels, and storage areas per location" />
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
+      <PageHeader 
+        title="Location Stock" 
+        subtitle="On-hand quantities, par levels, and storage areas per location"
+        actions={
+          <Button variant="outline" size="sm" onClick={load}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1" />Refresh
+          </Button>
+        }
+      />
 
-      {/* Date picker and location selector */}
+      {/* Location selector */}
       <div className="flex flex-wrap items-center gap-4 mb-6">
-        <div className="flex items-center gap-2 bg-card border border-border rounded-lg px-3 py-1.5">
-          <Calendar className="w-4 h-4 text-muted-foreground" />
-          <input
-            type="date"
-            value={snapshotDate}
-            onChange={(e) => setSnapshotDate(e.target.value)}
-            className="bg-transparent text-sm text-foreground focus:outline-none"
-          />
-        </div>
         {locations.map(loc => (
           <button
             key={loc.id}
@@ -277,12 +274,6 @@ export default function LocationStock() {
           </button>
         ))}
       </div>
-
-      {snapshotDate && (
-        <div className="mb-4 text-xs text-muted-foreground">
-          Viewing inventory as of <span className="font-medium text-foreground">{new Date(snapshotDate).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</span>
-        </div>
-      )}
 
       {selectedLoc && (
         <div className="flex flex-wrap items-start gap-4 mb-6">
@@ -337,6 +328,72 @@ export default function LocationStock() {
 
         {loading ? (
           <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
+        ) : isMobile ? (
+          <div className="space-y-3 p-3">
+            {Object.values(groupedItems).map(group => {
+              if (group.is_group && group.items.length > 1) {
+                return (
+                  <Fragment key={group.group_id}>
+                    <div className="px-3 py-2 bg-muted/40 rounded-lg">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{group.name} ({group.items.length} variants)</p>
+                    </div>
+                    {group.items.sort((a, b) => (a.group_sort_order || 0) - (b.group_sort_order || 0)).map(item => {
+                      const li = locInv.find(l => l.location_id === selectedLoc && l.item_id === item.id);
+                      const onHand = li?.on_hand_quantity || 0;
+                      const par = li?.par_level || 0;
+                      const isLow = par > 0 && onHand < par;
+                      const rowLi = li || { on_hand_quantity: 0, par_level: 0, reorder_point: 0 };
+                      return (
+                        <div key={item.id} className={`bg-card border rounded-xl p-4 ${isLow ? 'border-red-200' : 'border-border'}`}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <p className="font-medium text-sm">{item.name}</p>
+                              {item.category && <p className="text-xs text-muted-foreground">{item.category}</p>}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-border text-xs">
+                            <div><p className="text-muted-foreground">On Hand</p><p className={`font-semibold mt-0.5 ${isLow ? 'text-red-600' : ''}`}>{onHand} <span className="text-muted-foreground font-normal">{item.unit_of_measure}</span></p></div>
+                            <div><p className="text-muted-foreground">Par</p><p className="font-medium mt-0.5">{par || '—'}</p></div>
+                            <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand).toFixed(2)}</p></div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </Fragment>
+                );
+              } else {
+                const item = group.items[0];
+                const li = locInv.find(l => l.location_id === selectedLoc && l.item_id === item.id);
+                const onHand = li?.on_hand_quantity || 0;
+                const par = li?.par_level || 0;
+                const isLow = par > 0 && onHand < par;
+                const rowLi = li || { on_hand_quantity: 0, par_level: 0, reorder_point: 0 };
+                return (
+                  <div key={item.id} className={`bg-card border rounded-xl p-4 ${isLow ? 'border-red-200' : 'border-border'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1">
+                        <p className="font-medium text-sm">{item.name}</p>
+                        {item.category && <p className="text-xs text-muted-foreground">{item.category}</p>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-border text-xs">
+                      <div><p className="text-muted-foreground">On Hand</p><p className={`font-semibold mt-0.5 ${isLow ? 'text-red-600' : ''}`}>{onHand} <span className="text-muted-foreground font-normal">{item.unit_of_measure}</span></p></div>
+                      <div><p className="text-muted-foreground">Par</p><p className="font-medium mt-0.5">{par || '—'}</p></div>
+                      <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand).toFixed(2)}</p></div>
+                    </div>
+                  </div>
+                );
+              }
+            })}
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -348,35 +405,56 @@ export default function LocationStock() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {rows.map(row => {
-                  const onHand = row.li.on_hand_quantity || 0;
-                  const par = row.li.par_level || 0;
-                  const isLow = par > 0 && onHand < par;
-                  return (
-                    <tr key={row.item.id} className={`hover:bg-muted/30 transition-colors ${isLow ? 'bg-red-50/50' : ''}`}>
-                      <td className="px-4 py-3 font-medium">{row.item.name}</td>
-                      <td className="px-4 py-3 text-muted-foreground">{row.item.category || '—'}</td>
-                      <td className="px-4 py-3">
-                        <span className={`font-semibold ${isLow ? 'text-red-600' : 'text-foreground'}`}>{onHand}</span>
-                        <span className="text-muted-foreground ml-1 text-xs">{row.item.unit_of_measure}</span>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">{par || '—'}</td>
-                      <td className="px-4 py-3 text-muted-foreground">{row.li.reorder_point || '—'}</td>
-                      <td className="px-4 py-3 font-medium">${getItemValue(row.item, onHand, row.li.unit_cost).toFixed(2)}</td>
-                      <td className="px-4 py-3">
-                        {isLow ? (
-                          <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span>
-                        ) : (
-                          <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(row)}>
-                          <Pencil className="w-3.5 h-3.5" />
-                        </Button>
-                      </td>
-                    </tr>
-                  );
+                {Object.values(groupedItems).map(group => {
+                  if (group.is_group && group.items.length > 1) {
+                    return (
+                      <Fragment key={group.group_id}>
+                        <tr className="bg-muted/30">
+                          <td colSpan={8} className="px-4 py-2 font-semibold text-foreground">
+                            {group.name} ({group.items.length} variants)
+                          </td>
+                        </tr>
+                        {group.items.sort((a, b) => (a.group_sort_order || 0) - (b.group_sort_order || 0)).map(item => {
+                          const li = locInv.find(l => l.location_id === selectedLoc && l.item_id === item.id);
+                          const onHand = li?.on_hand_quantity || 0;
+                          const par = li?.par_level || 0;
+                          const isLow = par > 0 && onHand < par;
+                          const rowLi = li || { on_hand_quantity: 0, par_level: 0, reorder_point: 0 };
+                          return (
+                            <tr key={item.id} className={`hover:bg-muted/30 ${isLow ? 'bg-red-50/50' : ''}`}>
+                              <td className="px-4 py-3 pl-8 text-muted-foreground"><span className="text-xs">└─</span> {item.name}</td>
+                              <td className="px-4 py-3 text-muted-foreground">{item.category || '—'}</td>
+                              <td className="px-4 py-3"><span className={`font-semibold ${isLow ? 'text-red-600' : 'text-foreground'}`}>{onHand}</span><span className="text-muted-foreground ml-1 text-xs">{item.unit_of_measure}</span></td>
+                              <td className="px-4 py-3 text-muted-foreground">{par || '—'}</td>
+                              <td className="px-4 py-3 text-muted-foreground">{li?.reorder_point || '—'}</td>
+                              <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li?.unit_cost).toFixed(2)}</td>
+                              <td className="px-4 py-3">{isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}</td>
+                              <td className="px-4 py-3"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button></td>
+                            </tr>
+                          );
+                        })}
+                      </Fragment>
+                    );
+                  } else {
+                    const item = group.items[0];
+                    const li = locInv.find(l => l.location_id === selectedLoc && l.item_id === item.id);
+                    const onHand = li?.on_hand_quantity || 0;
+                    const par = li?.par_level || 0;
+                    const isLow = par > 0 && onHand < par;
+                    const rowLi = li || { on_hand_quantity: 0, par_level: 0, reorder_point: 0 };
+                    return (
+                      <tr key={item.id} className={`hover:bg-muted/30 transition-colors ${isLow ? 'bg-red-50/50' : ''}`}>
+                        <td className="px-4 py-3 font-medium">{item.name}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{item.category || '—'}</td>
+                        <td className="px-4 py-3"><span className={`font-semibold ${isLow ? 'text-red-600' : 'text-foreground'}`}>{onHand}</span><span className="text-muted-foreground ml-1 text-xs">{item.unit_of_measure}</span></td>
+                        <td className="px-4 py-3 text-muted-foreground">{par || '—'}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{li?.reorder_point || '—'}</td>
+                        <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li?.unit_cost).toFixed(2)}</td>
+                        <td className="px-4 py-3">{isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}</td>
+                        <td className="px-4 py-3"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button></td>
+                      </tr>
+                    );
+                  }
                 })}
               </tbody>
             </table>

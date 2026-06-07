@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import PageHeader from '@/components/layout/PageHeader';
 import VendorLocationSettings from '@/components/vendors/VendorLocationSettings';
 import { useAuth } from '@/lib/AuthContext';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const DAY_OPTIONS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -27,6 +28,7 @@ export default function Vendors() {
   const { userPermission, canAccessLocation, companyId } = useAuth();
   const isAdmin = userPermission?.role === 'admin';
   const isManagerOrStaff = !isAdmin;
+  const isMobile = useIsMobile();
 
   const [vendors, setVendors] = useState([]);
   const [locations, setLocations] = useState([]);
@@ -124,7 +126,7 @@ export default function Vendors() {
   };
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Vendors"
         subtitle="External suppliers with per-location delivery schedules and order settings"

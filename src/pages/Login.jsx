@@ -14,12 +14,6 @@ export default function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const activated = new URLSearchParams(window.location.search).get("activated") === "true";
-  const oauthError = new URLSearchParams(window.location.search).get("auth_error");
-  const displayError = error || (oauthError === "google_not_configured"
-    ? "Google sign-in is not configured yet. Add Google OAuth credentials on the server."
-    : oauthError
-      ? "Google sign-in failed. Please try again."
-      : "");
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -78,9 +72,9 @@ export default function Login() {
         </div>
       </div>
 
-      {displayError && (
+      {error && (
         <div className="mb-4 p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
-          {displayError}
+          {error}
         </div>
       )}
 

@@ -2,12 +2,13 @@ import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Package, MapPin, ArrowLeftRight,
   ShoppingCart, FileText, BarChart3, Users, Truck,
-  ClipboardList, Store, ChevronRight, Boxes, LogOut
+  ClipboardList, Store, ChevronRight, Boxes, LogOut, Globe, ShoppingBasket, X
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/AuthContext';
 import { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 const navGroups = [
   {
@@ -28,6 +29,8 @@ const navGroups = [
     label: 'Ordering',
     items: [
       { label: 'Vendor Orders', icon: ShoppingCart, href: '/orders' },
+      { label: 'Online Orders', icon: Globe, href: '/online-orders' },
+      { label: 'In-Store Shopping', icon: ShoppingBasket, href: '/instore-orders' },
       { label: 'Commissary', icon: Store, href: '/commissary', commissaryOnly: true },
       { label: 'Transfers', icon: ArrowLeftRight, href: '/transfers' },
     ]
@@ -49,10 +52,11 @@ const navGroups = [
   }
 ];
 
-export default function Sidebar({ collapsed, onToggle }) {
+export default function Sidebar({ collapsed, onToggle, mobileOpen, setMobileOpen }) {
   const location = useLocation();
   const { user, userPermission, canAccessCommissary, logout } = useAuth();
   const [companyLogo, setCompanyLogo] = useState(null);
+  const isMobile = useIsMobile();
 
   const loadLogo = async () => {
     const settings = await base44.entities.CompanySettings.list();
@@ -83,8 +87,8 @@ export default function Sidebar({ collapsed, onToggle }) {
 
   return (
     <aside className={cn(
-      "fixed left-0 top-0 h-full bg-sidebar flex flex-col transition-all duration-300 z-40",
-      collapsed ? "w-16" : "w-60"
+      "h-full bg-sidebar flex flex-col",
+      isMobile ? "w-64 shadow-2xl" : (collapsed ? "w-16" : "w-60")
     )}>
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-sidebar-border">
@@ -95,8 +99,16 @@ export default function Sidebar({ collapsed, onToggle }) {
             <Package className="w-4 h-4 text-white" />
           </div>
         )}
-        {!collapsed && (
+        {!isMobile && !collapsed && (
           <span className="text-sidebar-foreground font-semibold text-base tracking-tight">InventoryHQ</span>
+        )}
+        {isMobile && (
+          <button
+            onClick={() => setMobileOpen?.(false)}
+            className="ml-auto text-sidebar-muted hover:text-sidebar-foreground"
+          >
+            <X className="w-5 h-5" />
+          </button>
         )}
       </div>
 
@@ -116,6 +128,7 @@ export default function Sidebar({ collapsed, onToggle }) {
                   <li key={item.href}>
                     <Link
                       to={item.href}
+                      onClick={() => isMobile && setMobileOpen?.(false)}
                       className={cn(
                         "flex items-center gap-3 px-2 py-2 rounded-lg transition-colors text-sm font-medium",
                         active
@@ -157,13 +170,15 @@ export default function Sidebar({ collapsed, onToggle }) {
         </button>
       </div>
 
-      {/* Collapse toggle */}
-      <button
-        onClick={onToggle}
-        className="flex items-center justify-center p-3 border-t border-sidebar-border text-sidebar-muted hover:text-sidebar-foreground transition-colors"
-      >
-        <ChevronRight className={cn("w-4 h-4 transition-transform", !collapsed && "rotate-180")} />
-      </button>
+      {/* Collapse toggle - only show on desktop */}
+      {!isMobile && (
+        <button
+          onClick={onToggle}
+          className="flex items-center justify-center p-3 border-t border-sidebar-border text-sidebar-muted hover:text-sidebar-foreground transition-colors"
+        >
+          <ChevronRight className={cn("w-4 h-4 transition-transform", !collapsed && "rotate-180")} />
+        </button>
+      )}
     </aside>
   );
 }

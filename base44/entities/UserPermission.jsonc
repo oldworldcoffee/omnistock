@@ -53,6 +53,13 @@
             "type": "string"
           },
           "description": "Specific location IDs this user can access"
+        },
+        "commissary_manage_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Commissary location IDs this user can manage and fulfill orders for"
         }
       }
     },

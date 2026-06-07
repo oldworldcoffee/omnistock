@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Plus, ArrowLeftRight, CheckCircle, Eye, Search, ShoppingCart, Package, Trash2, Minus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,8 +23,11 @@ export default function Transfers() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const isMobile = useIsMobile();
 
   const [allLocations, setAllLocations] = useState([]);
+
+  const [companyId, setCompanyId] = useState('');
 
   const load = () => Promise.all([
     base44.entities.Location.list(),
@@ -35,6 +39,7 @@ export default function Transfers() {
     const accessibleLocIds = new Set(accessibleLocs.map(l => l.id));
     setAllLocations(locs); // all locations for form dropdowns
     setLocations(accessibleLocs); // only accessible for display/names
+    setCompanyId(locs[0]?.company_id || ''); // Get company ID from first location
     setItems(itms);
     setLocInv(linv);
     // Filter history to only show transfers involving the user's locations
@@ -79,12 +84,27 @@ export default function Transfers() {
     });
   };
 
+  const updateItemQtyInput = (idx, val) => {
+    const num = Math.max(0, parseFloat(val) || 0);
+    setForm(prev => {
+      const its = [...prev.items];
+      its[idx] = { ...its[idx], quantity: num };
+      return { ...prev, items: its };
+    });
+  };
+
   const removeItem = (idx) => {
     setForm(f => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
   };
 
   const submitTransfer = async (immediate = false) => {
+    // Validate no negative quantities
+    if (form.items.some(i => i.quantity < 0 || isNaN(i.quantity))) {
+      alert('Quantities cannot be negative');
+      return;
+    }
     const transfer = await base44.entities.Transfer.create({
+      company_id: companyId,
       ...form,
       status: immediate ? 'received' : 'in_transit',
       transfer_number: `TR-${Date.now().toString().slice(-6)}`,
@@ -105,7 +125,7 @@ export default function Transfers() {
         const li = locInv.find(l => l.location_id === form.to_location_id && l.item_id === item.item_id);
         const newQty = (li?.on_hand_quantity || 0) + item.quantity;
         if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-        else await base44.entities.LocationInventory.create({ location_id: form.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
+        else await base44.entities.LocationInventory.create({ company_id: companyId, location_id: form.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
       }
     }
     await load();
@@ -120,7 +140,7 @@ export default function Transfers() {
       const li = locInv.find(l => l.location_id === transfer.to_location_id && l.item_id === item.item_id);
       const newQty = (li?.on_hand_quantity || 0) + item.quantity;
       if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-      else await base44.entities.LocationInventory.create({ location_id: transfer.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
+      else await base44.entities.LocationInventory.create({ company_id: companyId, location_id: transfer.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
     }
     await load();
     setViewDialog(null);
@@ -129,17 +149,48 @@ export default function Transfers() {
   const locName = (id) => allLocations.find(l => l.id === id)?.name || locations.find(l => l.id === id)?.name || '—';
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-3 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Transfers"
         subtitle="Move inventory between locations"
-        actions={<Button onClick={() => setNewDialog(true)}><Plus className="w-4 h-4 mr-1" />New Transfer</Button>}
+        actions={<Button onClick={() => setNewDialog(true)} className={isMobile ? "text-xs px-2 py-1 h-8" : ""}><Plus className={isMobile ? "w-3 h-3 mr-1" : "w-4 h-4 mr-1"} />New Transfer</Button>}
       />
 
-      <div className="bg-card border border-border rounded-xl overflow-hidden">
-        {loading ? (
-          <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
-        ) : (
+      {loading ? (
+        <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
+      ) : isMobile ? (
+        <div className="space-y-3">
+          {transfers.length === 0 ? (
+            <div className="bg-card border border-border rounded-xl p-8 text-center text-muted-foreground">No transfers yet.</div>
+          ) : transfers.map(t => (
+            <div key={t.id} className="bg-card border border-border rounded-xl p-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-sm font-mono">{t.transfer_number}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{format(new Date(t.created_date), 'MMM d, h:mm a')}</p>
+                </div>
+                <StatusBadge status={t.status} />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div><span className="text-muted-foreground block">From</span><span className="font-medium">{locName(t.from_location_id)}</span></div>
+                <div><span className="text-muted-foreground block">To</span><span className="font-medium">{locName(t.to_location_id)}</span></div>
+                <div><span className="text-muted-foreground block">Items</span><span className="font-medium">{t.items?.length || 0}</span></div>
+              </div>
+              <div className="flex gap-2 pt-1 border-t border-border">
+                <Button variant="outline" size="sm" className="flex-1 h-9" onClick={() => setViewDialog(t)}>
+                  <Eye className="w-4 h-4 mr-1" />View
+                </Button>
+                {t.status === 'in_transit' && (
+                  <Button size="sm" className="flex-1 h-9 text-white bg-green-600 hover:bg-green-700" onClick={() => receiveTransfer(t)}>
+                    <CheckCircle className="w-4 h-4 mr-1" />Receive
+                  </Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr>
@@ -161,13 +212,9 @@ export default function Transfers() {
                   <td className="px-4 py-3 text-muted-foreground text-xs">{format(new Date(t.created_date), 'MMM d, h:mm a')}</td>
                   <td className="px-4 py-3">
                     <div className="flex gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setViewDialog(t)}>
-                        <Eye className="w-3.5 h-3.5" />
-                      </Button>
+                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setViewDialog(t)}><Eye className="w-3.5 h-3.5" /></Button>
                       {t.status === 'in_transit' && (
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-green-600" onClick={() => receiveTransfer(t)}>
-                          <CheckCircle className="w-3.5 h-3.5" />
-                        </Button>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-green-600" onClick={() => receiveTransfer(t)}><CheckCircle className="w-3.5 h-3.5" /></Button>
                       )}
                     </div>
                   </td>
@@ -175,15 +222,15 @@ export default function Transfers() {
               ))}
             </tbody>
           </table>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* New Transfer Dialog */}
       <Dialog open={newDialog} onOpenChange={setNewDialog}>
-        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className={isMobile ? "max-w-full max-h-[90vh] overflow-y-auto mx-2" : "max-w-5xl max-h-[90vh] overflow-y-auto"}>
           <DialogHeader><DialogTitle>New Transfer</DialogTitle></DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-4">
+          <div className={isMobile ? "space-y-3 py-2" : "space-y-4 py-2"}>
+            <div className={isMobile ? "grid grid-cols-1 gap-3" : "grid grid-cols-2 gap-4"}>
               <div>
                 <Label>From Location *</Label>
                 <select className="mt-1 w-full border border-input rounded-md px-3 py-2 text-sm bg-background" value={form.from_location_id} onChange={e => setForm(f => ({ ...f, from_location_id: e.target.value }))}>
@@ -200,7 +247,7 @@ export default function Transfers() {
               </div>
             </div>
 
-            <div className="flex gap-4 h-[500px]">
+            <div className={isMobile ? "flex flex-col gap-4 h-auto" : "flex gap-4 h-[500px]"}>
               {/* LEFT: Catalog */}
               <div className="flex-1 flex flex-col bg-card border border-border rounded-xl overflow-hidden">
                 <div className="p-4 border-b border-border bg-muted/30 space-y-3">
@@ -278,7 +325,7 @@ export default function Transfers() {
               </div>
 
               {/* RIGHT: Cart */}
-              <div className="w-80 flex flex-col bg-card border border-border rounded-xl overflow-hidden">
+              <div className={isMobile ? "w-full flex flex-col bg-card border border-border rounded-xl overflow-hidden" : "w-80 flex flex-col bg-card border border-border rounded-xl overflow-hidden"}>
                 <div className="p-4 border-b border-border bg-muted/30 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <ShoppingCart className="w-4 h-4 text-primary" />
@@ -333,7 +380,7 @@ export default function Transfers() {
                                 type="number"
                                 min="0"
                                 value={item.quantity}
-                                onChange={e => updateItemQty(idx, e.target.value)}
+                                onChange={e => updateItemQtyInput(idx, e.target.value)}
                                 className="w-12 h-6 text-center text-xs border border-input rounded bg-background"
                               />
                               <button
@@ -371,27 +418,27 @@ export default function Transfers() {
 
       {/* View Dialog */}
       <Dialog open={!!viewDialog} onOpenChange={() => setViewDialog(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className={isMobile ? "max-w-full max-h-[90vh] overflow-y-auto mx-2" : "max-w-lg"}>
           <DialogHeader><DialogTitle>Transfer {viewDialog?.transfer_number}</DialogTitle></DialogHeader>
           {viewDialog && (
-            <div className="space-y-3 py-2 text-sm">
-              <div className="grid grid-cols-2 gap-2">
+            <div className={isMobile ? "space-y-3 py-2 text-sm" : "space-y-3 py-2 text-sm"}>
+              <div className={isMobile ? "grid grid-cols-1 gap-2" : "grid grid-cols-2 gap-2"}>
                 <div><span className="text-muted-foreground">From:</span> <span className="font-medium">{locName(viewDialog.from_location_id)}</span></div>
                 <div><span className="text-muted-foreground">To:</span> <span className="font-medium">{locName(viewDialog.to_location_id)}</span></div>
                 <div><span className="text-muted-foreground">Status:</span> <StatusBadge status={viewDialog.status} /></div>
-                {viewDialog.notes && <div className="col-span-2"><span className="text-muted-foreground">Notes:</span> {viewDialog.notes}</div>}
+                {viewDialog.notes && <div className={isMobile ? "col-span-1" : "col-span-2"}><span className="text-muted-foreground">Notes:</span> {viewDialog.notes}</div>}
               </div>
               <div className="border border-border rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/50">
-                    <tr>{['Item', 'Qty', 'UOM'].map(h => <th key={h} className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">{h}</th>)}</tr>
+                    <tr>{['Item', 'Qty', 'UOM'].map(h => <th key={h} className={`text-left ${isMobile ? 'px-2 py-2' : 'px-3 py-2'} text-xs font-medium text-muted-foreground`}>{h}</th>)}</tr>
                   </thead>
                   <tbody className="divide-y divide-border">
                     {viewDialog.items?.map((item, i) => (
                       <tr key={i}>
-                        <td className="px-3 py-2">{item.item_name}</td>
-                        <td className="px-3 py-2">{item.quantity}</td>
-                        <td className="px-3 py-2 text-muted-foreground">{item.unit_of_measure}</td>
+                        <td className={`${isMobile ? 'px-2 py-2 text-xs' : 'px-3 py-2'}`}>{item.item_name}</td>
+                        <td className={`${isMobile ? 'px-2 py-2 text-xs' : 'px-3 py-2'}`}>{item.quantity}</td>
+                        <td className={`${isMobile ? 'px-2 py-2 text-xs' : 'px-3 py-2'} text-muted-foreground`}>{item.unit_of_measure}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -399,7 +446,7 @@ export default function Transfers() {
               </div>
               {viewDialog.status === 'in_transit' && (
                 <Button className="w-full" onClick={() => receiveTransfer(viewDialog)}>
-                  <CheckCircle className="w-4 h-4 mr-1" />Confirm Receipt & Update Stock
+                  <CheckCircle className={isMobile ? "w-3 h-3 mr-1" : "w-4 h-4 mr-1"} />Confirm Receipt & Update Stock
                 </Button>
               )}
             </div>

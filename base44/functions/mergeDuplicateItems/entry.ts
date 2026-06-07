@@ -28,31 +28,55 @@ Deno.serve(async (req) => {
       const keep = keep_id === item1_id ? item1 : item2;
       const remove = keep_id === item1_id ? item2 : item1;
 
-      // Merge purchase options
-      const existingVendorNames = new Set((keep.purchase_options || []).map(o => o.vendor_name?.toLowerCase()));
-      const newOptions = [];
+      // Merge purchase options - check for duplicates by comparing full option details
+      const keepOptions = keep.purchase_options || [];
+      const removeOptions = remove.purchase_options || [];
       
-      for (const opt of (remove.purchase_options || [])) {
-        if (!existingVendorNames.has(opt.vendor_name?.toLowerCase())) {
+      console.log('MERGE DEBUG:', {
+        keep_name: keep.name,
+        keep_options: keepOptions.length,
+        remove_name: remove.name,
+        remove_options: removeOptions.length,
+        keep_options_detail: keepOptions.map(o => ({ vendor_name: o.vendor_name, product_code: o.product_code, vendor_id: o.vendor_id, pack_size: o.pack_size })),
+        remove_options_detail: removeOptions.map(o => ({ vendor_name: o.vendor_name, product_code: o.product_code, vendor_id: o.vendor_id, pack_size: o.pack_size }))
+      });
+      
+      // Create a set of existing options based on vendor_id + vendor_name + product_code + pack_size breakdown
+      // Different pack breakdowns from same vendor are considered different purchase options
+      const existingOptionKeys = new Set(keepOptions.map(o => 
+        `${o.vendor_id || ''}|${(o.vendor_name || '').toLowerCase()}|${(o.product_code || '').toLowerCase()}|${o.inner_pack_units || ''}|${(o.inner_pack_name || '').toLowerCase()}|${o.packs_per_case || ''}`
+      ));
+      
+      const newOptions = [];
+      for (const opt of removeOptions) {
+        const optionKey = `${opt.vendor_id || ''}|${(opt.vendor_name || '').toLowerCase()}|${(opt.product_code || '').toLowerCase()}|${opt.inner_pack_units || ''}|${(opt.inner_pack_name || '').toLowerCase()}|${opt.packs_per_case || ''}`;
+        
+        // Only add if this exact option doesn't already exist
+        if (!existingOptionKeys.has(optionKey)) {
           newOptions.push(opt);
-          existingVendorNames.add(opt.vendor_name.toLowerCase());
+          existingOptionKeys.add(optionKey);
         }
       }
       
-      // Update keep item with merged purchase options
-      if (newOptions.length > 0) {
-        const updatedOptions = [...(keep.purchase_options || []), ...newOptions];
-        await base44.asServiceRole.entities.InventoryItem.update(keep.id, {
-          purchase_options: updatedOptions
-        });
-      }
+      console.log('MERGE RESULT:', { new_options_count: newOptions.length, total_options: keepOptions.length + newOptions.length });
+      
+      // Combine and save all purchase options
+      const updatedOptions = [...keepOptions, ...newOptions];
+      await base44.asServiceRole.entities.InventoryItem.update(keep.id, {
+        purchase_options: updatedOptions
+      });
       
       // Delete the duplicate
       await base44.asServiceRole.entities.InventoryItem.delete(remove.id);
       
+      // Reload the kept item to confirm it exists and has the merged data
+      const keptItemAfterMerge = await base44.asServiceRole.entities.InventoryItem.get(keep.id);
+      
       return Response.json({
         success: true,
-        kept_name: keep.name,
+        kept_id: keptItemAfterMerge.id,
+        kept_name: keptItemAfterMerge.name,
+        kept_purchase_options_count: (keptItemAfterMerge.purchase_options || []).length,
         removed_name: remove.name
       });
     }

@@ -6,9 +6,11 @@ import StatCard from '@/components/ui/StatCard';
 import PageHeader from '@/components/layout/PageHeader';
 import { Link } from 'react-router-dom';
 import StatusBadge from '@/components/ui/StatusBadge';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 export default function Dashboard() {
   const { canAccessLocation } = useAuth();
+  const isMobile = useIsMobile();
   const [locations, setLocations] = useState([]);
   const [items, setItems] = useState([]);
   const [locInv, setLocInv] = useState([]);
@@ -67,11 +69,11 @@ export default function Dashboard() {
   );
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader title="Dashboard" subtitle="Overview across all locations" />
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         <StatCard label="Total Inventory Value" value={`$${totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} icon={DollarSign} color="text-primary" />
         <StatCard label="Low Stock Alerts" value={lowStockCount} sub="items below par" icon={AlertTriangle} color="text-warning" />
         <StatCard label="Pending Transfers" value={pendingTransfers} icon={ArrowLeftRight} color="text-info" />
@@ -79,15 +81,15 @@ export default function Dashboard() {
       </div>
 
       {/* Location Value Breakdown */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <div className="bg-card border border-border rounded-xl p-5">
-          <h2 className="font-semibold text-foreground mb-4">Inventory Value by Location</h2>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        <div className="bg-card border border-border rounded-xl p-4">
+          <h2 className="font-semibold text-foreground mb-3">Inventory Value by Location</h2>
           {locationValues.length === 0 ? (
             <p className="text-muted-foreground text-sm">No locations yet. <Link to="/locations" className="text-primary underline">Add locations</Link></p>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2">
               {locationValues.map(loc => (
-                <div key={loc.id} className="flex items-center justify-between">
+                <div key={loc.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
                   <div className="flex items-center gap-2">
                     <StatusBadge status={loc.type} />
                     <span className="text-sm font-medium">{loc.name}</span>
@@ -99,15 +101,15 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Recent Activity */}
-        <div className="bg-card border border-border rounded-xl p-5">
-          <h2 className="font-semibold text-foreground mb-4">Recent Orders</h2>
+        {/* Recent Orders */}
+        <div className="bg-card border border-border rounded-xl p-4">
+          <h2 className="font-semibold text-foreground mb-3">Recent Orders</h2>
           {orders.length === 0 ? (
             <p className="text-muted-foreground text-sm">No orders yet. <Link to="/orders" className="text-primary underline">Place an order</Link></p>
           ) : (
             <div className="space-y-2">
               {orders.slice(0, 6).map(order => (
-                <div key={order.id} className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
+                <div key={order.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
                   <div>
                     <p className="text-sm font-medium">{order.order_number || `Order #${order.id.slice(-6)}`}</p>
                     <p className="text-xs text-muted-foreground capitalize">{order.type} order</p>

@@ -18,7 +18,7 @@
         "no_orders"
       ],
       "default": "email",
-      "description": "How orders are placed with this vendor: email order, online only, in-store grocery run, or not for orders"
+      "description": "How orders are placed with this vendor"
     },
     "contact_name": {
       "type": "string"
@@ -42,14 +42,18 @@
     "is_commissary": {
       "type": "boolean",
       "default": false,
-      "description": "True if this vendor acts as a commissary/warehouse that fulfills retail location orders"
+      "description": "True if this vendor acts as a commissary/warehouse"
+    },
+    "commissioned_location_id": {
+      "type": "string",
+      "description": "The Location ID of the commissary this vendor represents (auto-created)"
     },
     "authorized_location_ids": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "Location IDs authorized to order from this vendor. Empty/null means all locations."
+      "description": "Location IDs authorized to order from this vendor. Empty/null means all."
     },
     "default_order_email": {
       "type": "string"
@@ -71,32 +75,27 @@
     },
     "default_delivery_days": {
       "type": "array",
-      "description": "Default delivery schedule for all locations (can be overridden per location)",
       "items": {
         "type": "object",
         "properties": {
           "day": {
-            "type": "string",
-            "description": "e.g. Monday"
+            "type": "string"
           },
           "enabled": {
             "type": "boolean",
             "default": false
           },
           "cutoff_day": {
-            "type": "string",
-            "description": "Day order must be placed by"
+            "type": "string"
           },
           "cutoff_time": {
-            "type": "string",
-            "description": "Time order must be placed by (e.g. 5:00 PM)"
+            "type": "string"
           }
         }
       }
     },
     "location_settings": {
       "type": "array",
-      "description": "Per-location order settings for this vendor",
       "items": {
         "type": "object",
         "properties": {
@@ -104,12 +103,10 @@
             "type": "string"
           },
           "order_email": {
-            "type": "string",
-            "description": "Order email specific to this location"
+            "type": "string"
           },
           "cc_email": {
-            "type": "string",
-            "description": "CC email for orders from this location"
+            "type": "string"
           },
           "min_order_type": {
             "type": "string",
@@ -118,34 +115,28 @@
               "dollar",
               "cases"
             ],
-            "default": "none",
-            "description": "Type of minimum order requirement"
+            "default": "none"
           },
           "min_order_value": {
-            "type": "number",
-            "description": "Minimum order value (dollars or case count)"
+            "type": "number"
           },
           "delivery_days": {
             "type": "array",
-            "description": "Delivery schedule per day of week",
             "items": {
               "type": "object",
               "properties": {
                 "day": {
-                  "type": "string",
-                  "description": "e.g. Monday"
+                  "type": "string"
                 },
                 "enabled": {
                   "type": "boolean",
                   "default": false
                 },
                 "cutoff_day": {
-                  "type": "string",
-                  "description": "Day order must be placed by"
+                  "type": "string"
                 },
                 "cutoff_time": {
-                  "type": "string",
-                  "description": "Time order must be placed by (e.g. 5:00 PM)"
+                  "type": "string"
                 }
               }
             }

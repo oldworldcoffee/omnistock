@@ -61,6 +61,17 @@
           },
           "total_cost": {
             "type": "number"
+          },
+          "variant_id": {
+            "type": "string",
+            "description": "Single variant ID if a specific variant was selected"
+          },
+          "variant_quantities": {
+            "type": "object",
+            "description": "Map of variant_id to quantity when multiple variants are ordered",
+            "additionalProperties": {
+              "type": "number"
+            }
           }
         }
       }

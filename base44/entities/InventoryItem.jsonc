@@ -112,6 +112,10 @@
             "type": "string",
             "description": "Name of the inner pack (e.g. Sleeve, Tray, Bag)"
           },
+          "inner_pack_uom": {
+            "type": "string",
+            "description": "Unit of measure for inner pack (e.g. gal, fl-oz, oz)"
+          },
           "packs_per_case": {
             "type": "number",
             "description": "Number of inner packs per case"
@@ -146,6 +150,15 @@
       "type": "string",
       "format": "date-time",
       "description": "When smart pars were last calculated"
+    },
+    "product_group_id": {
+      "type": "string",
+      "description": "Group ID for related items (e.g. different sizes of same product)"
+    },
+    "group_sort_order": {
+      "type": "number",
+      "default": 0,
+      "description": "Sort order within product group"
     }
   },
   "required": [
