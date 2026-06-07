@@ -143,7 +143,6 @@ export default function InventoryCounts() {
 
   const recoverSubmittedCount = (count, inventoryRows = locInv) => {
     if (count.status !== 'submitted' || !Array.isArray(count.items) || count.items.length === 0) return count;
-    if (count.items.some(hasRecordedQuantity)) return count;
 
     const inventoryByItem = new Map(
       inventoryRows
@@ -153,8 +152,10 @@ export default function InventoryCounts() {
     let recoveredAny = false;
 
     const recoveredItems = count.items.map(row => {
+      if (hasRecordedQuantity(row)) return row;
+
       if (row.has_variants && Array.isArray(row.grouped_items)) {
-        const unitInputs = { ...(row.unit_inputs || {}) };
+        const unitInputs = {};
         const total = row.grouped_items.reduce((sum, variant) => {
           const quantity = Number(inventoryByItem.get(variant.item_id)?.on_hand_quantity || 0);
           if (quantity !== 0) {
@@ -163,12 +164,20 @@ export default function InventoryCounts() {
           }
           return sum + quantity;
         }, 0);
-        return { ...row, counted_quantity: total, unit_inputs: unitInputs };
+        const area_counts = Array.isArray(row.area_counts) && row.area_counts.length > 0
+          ? row.area_counts.map((ac, index) => index === 0
+            ? { ...ac, quantity: total, unit_inputs: { ...(ac.unit_inputs || {}), ...unitInputs } }
+            : ac)
+          : row.area_counts;
+        return { ...row, counted_quantity: total, unit_inputs: Object.keys(unitInputs).length ? unitInputs : row.unit_inputs, area_counts };
       }
 
       const quantity = Number(inventoryByItem.get(row.item_id)?.on_hand_quantity || 0);
       if (quantity !== 0) recoveredAny = true;
-      return { ...row, counted_quantity: quantity };
+      const area_counts = Array.isArray(row.area_counts) && row.area_counts.length > 0
+        ? row.area_counts.map((ac, index) => index === 0 ? { ...ac, quantity } : ac)
+        : row.area_counts;
+      return { ...row, counted_quantity: quantity, area_counts };
     });
 
     return recoveredAny
@@ -334,7 +343,16 @@ export default function InventoryCounts() {
 
   const viewCount = async (count) => {
     const freshCount = await base44.entities.InventoryCount.get(count.id);
-    setActiveCount(recoverSubmittedCount(freshCount));
+    const latestLocInv = await base44.entities.LocationInventory.list();
+    setLocInv(latestLocInv);
+    const recoveredCount = recoverSubmittedCount(freshCount, latestLocInv);
+    if (recoveredCount.recovered_from_location_inventory) {
+      await base44.entities.InventoryCount.update(freshCount.id, {
+        items: recoveredCount.items,
+        recovered_from_location_inventory: true,
+      });
+    }
+    setActiveCount(recoveredCount);
     setActiveAreaIdx(0);
   };
 
@@ -352,6 +370,34 @@ export default function InventoryCounts() {
     if (packUnits > 1) return (onHand / packUnits) * unitCost;
     return onHand * unitCost;
   };
+
+  const getGroupedQuantities = (row) => {
+    if (!row.has_variants || !Array.isArray(row.grouped_items)) return null;
+    const hasAreaInputs = (row.area_counts || []).some(ac =>
+      Object.values(ac.unit_inputs || {}).some(value => Number(value || 0) !== 0)
+    );
+
+    return row.grouped_items.map(variant => {
+      const label = variant.variant_name;
+      const quantity = hasAreaInputs
+        ? (row.area_counts || []).reduce((sum, ac) => sum + Number(ac.unit_inputs?.[label] || 0), 0)
+        : Number(row.unit_inputs?.[label] || 0);
+      return { ...variant, quantity };
+    });
+  };
+
+  const getCountRowValue = (row) => {
+    const groupedQuantities = getGroupedQuantities(row);
+    if (groupedQuantities) {
+      const groupedValue = groupedQuantities.reduce((sum, variant) => (
+        sum + getItemValue(variant.item_id, variant.quantity)
+      ), 0);
+      if (groupedValue > 0) return groupedValue;
+    }
+    return getItemValue(row.item_id, row.counted_quantity || 0);
+  };
+
+  const getCountTotalValue = (count) => (count.items || []).reduce((sum, row) => sum + getCountRowValue(row), 0);
 
   const getCountUnits = (item, variant = null) => {
     // Use explicitly configured count_units if set
@@ -513,10 +559,13 @@ export default function InventoryCounts() {
       for (const row of submittedItems) {
         if (!row.has_variants || !row.grouped_items) continue;
         
-        const unitInputs = row.unit_inputs || {};
         row.grouped_items.forEach((variant) => {
           const variantLabel = variant.variant_name;
-          const qty = parseFloat(unitInputs[variantLabel]) || 0;
+          const areaQty = (row.area_counts || []).reduce((sum, ac) => (
+            sum + (parseFloat(ac.unit_inputs?.[variantLabel]) || 0)
+          ), 0);
+          const directQty = parseFloat(row.unit_inputs?.[variantLabel]) || 0;
+          const qty = areaQty || directQty;
           if (!itemQtyMap[variant.item_id]) {
             itemQtyMap[variant.item_id] = 0;
           }
@@ -1307,7 +1356,7 @@ export default function InventoryCounts() {
                     ))}
                     <div className="bg-primary/5 border border-primary/20 rounded-lg px-4 py-3 flex items-center justify-between">
                       <span className="text-sm font-semibold">Grand Total Value:</span>
-                      <span className="font-bold text-lg text-green-700">${activeCount.items.reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity), 0).toFixed(2)}</span>
+                      <span className="font-bold text-lg text-green-700">${getCountTotalValue(activeCount).toFixed(2)}</span>
                     </div>
                   </div>
                 ) : (
@@ -1340,7 +1389,7 @@ export default function InventoryCounts() {
                     <tfoot className="bg-primary/5 border-t-2 border-primary/20">
                       <tr>
                         <td colSpan={areas.length + 2} className="px-4 py-3 text-sm font-semibold text-right text-foreground">Grand Total Value:</td>
-                        <td className="px-4 py-3 font-bold text-lg text-green-700">${activeCount.items.reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity), 0).toFixed(2)}</td>
+                        <td className="px-4 py-3 font-bold text-lg text-green-700">${getCountTotalValue(activeCount).toFixed(2)}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -1450,7 +1499,7 @@ export default function InventoryCounts() {
                         <tr>
                           <td colSpan={5} className="px-4 py-3 text-sm font-semibold text-right text-foreground">Grand Total Value:</td>
                           <td className="px-4 py-3 font-bold text-lg text-green-700">
-                            ${activeCount.items.reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity), 0).toFixed(2)}
+                            ${getCountTotalValue(activeCount).toFixed(2)}
                           </td>
                         </tr>
                       </tfoot>
@@ -1504,7 +1553,7 @@ export default function InventoryCounts() {
             <div className="bg-card border border-border rounded-xl px-4 py-8 text-center text-muted-foreground text-sm">No counts yet. Start your first inventory count.</div>
           ) : counts.map(c => {
             const usedAreas = [...new Set((c.items || []).flatMap(i => (i.area_counts || []).map(ac => ac.area_name)))].filter(Boolean);
-            const totalValue = (c.items || []).reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity || 0), 0);
+            const totalValue = getCountTotalValue(c);
             return (
               <div key={c.id} className="bg-card border border-border rounded-xl p-4 space-y-3">
                 <div className="flex items-start justify-between gap-2">
@@ -1554,7 +1603,7 @@ export default function InventoryCounts() {
                     <td className="px-4 py-3 capitalize">{c.count_type}{c.categories?.length > 0 && <span className="text-muted-foreground ml-1 text-xs">({c.categories.join(', ')})</span>}</td>
                     <td className="px-4 py-3 text-muted-foreground">{usedAreas.length > 0 ? usedAreas.join(', ') : '—'}</td>
                     <td className="px-4 py-3 text-muted-foreground">{c.items?.length || 0} items</td>
-                    <td className="px-4 py-3 font-medium text-green-700">${(c.items || []).reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity || 0), 0).toFixed(2)}</td>
+                    <td className="px-4 py-3 font-medium text-green-700">${getCountTotalValue(c).toFixed(2)}</td>
                     <td className="px-4 py-3"><StatusBadge status={c.status} /></td>
                     <td className="px-4 py-3">
                       {c.status === 'draft' ? (
