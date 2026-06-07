@@ -14,13 +14,17 @@ if (typeof process.loadEnvFile === 'function') {
     if (error.code !== 'ENOENT') console.warn('Unable to load .env:', error.message);
   }
 }
-const dataDir = path.resolve(process.env.DATA_DIR || path.join(rootDir, 'data'));
+const vercelEnv = process.env.VERCEL_ENV || (process.env.VERCEL === '1' ? 'vercel' : 'local');
+const isVercel = process.env.VERCEL === '1' || vercelEnv !== 'local';
+const defaultDataDir = isVercel ? path.join('/tmp', 'omnistock-data') : path.join(rootDir, 'data');
+const dataDir = path.resolve(process.env.DATA_DIR || defaultDataDir);
 const uploadDir = path.join(dataDir, 'uploads');
 const dbFile = path.join(dataDir, 'db.json');
 const port = Number(process.env.PORT || 8787);
 const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const supabaseStateId = process.env.SUPABASE_STATE_ID || 'default';
+const defaultSupabaseStateId = vercelEnv === 'preview' ? 'preview' : 'default';
+const supabaseStateId = process.env.SUPABASE_STATE_ID || defaultSupabaseStateId;
 const supabaseStorageBucket = process.env.SUPABASE_STORAGE_BUCKET || '';
 const useSupabase = Boolean(supabaseUrl && supabaseServiceRoleKey);
 
@@ -1044,6 +1048,26 @@ const functionHandlers = {
     const itemQtyMap = body.itemQtyMap || {};
     const locationId = body.locationId || body.location_id;
     const companyId = body.companyId || companyIdForUser(db, user);
+    const existingCount = body.countId ? getEntityRecord(db, 'InventoryCount', body.countId) : null;
+    const submittedItems = Array.isArray(body.items)
+      ? body.items
+      : Array.isArray(existingCount?.items)
+        ? existingCount.items.map((row) => {
+          if (row.has_variants && Array.isArray(row.grouped_items)) {
+            const unitInputs = { ...(row.unit_inputs || {}) };
+            const countedQuantity = row.grouped_items.reduce((sum, variant) => {
+              const quantity = Number(itemQtyMap[variant.item_id] || 0);
+              if (quantity !== 0) unitInputs[variant.variant_name] = quantity;
+              return sum + quantity;
+            }, 0);
+            return { ...row, counted_quantity: countedQuantity, unit_inputs: unitInputs };
+          }
+          return {
+            ...row,
+            counted_quantity: Number(itemQtyMap[row.item_id] ?? row.counted_quantity ?? 0)
+          };
+        })
+        : undefined;
     let updated = 0;
     let created = 0;
 
@@ -1076,7 +1100,8 @@ const functionHandlers = {
       updateRecord(db, 'InventoryCount', body.countId, {
         status: 'submitted',
         submitted_at: nowIso(),
-        submitted_by: user?.email || 'system'
+        submitted_by: user?.email || 'system',
+        ...(submittedItems ? { items: submittedItems } : {})
       });
     }
 
@@ -1535,7 +1560,19 @@ export const requestHandler = async (req, res) => {
   const pathname = url.pathname;
 
   try {
-    if (pathname === '/api/health') return sendJson(res, 200, { ok: true });
+    if (pathname === '/api/health') {
+      return sendJson(res, 200, {
+        ok: true,
+        environment: vercelEnv,
+        persistence: useSupabase ? 'supabase' : isVercel ? 'temporary' : 'local-file',
+        supabase_configured: useSupabase,
+        supabase_state_id: supabaseStateId,
+        storage_configured: Boolean(useSupabase && supabaseStorageBucket),
+        warning: !useSupabase && isVercel
+          ? 'Supabase environment variables are not configured; data will not persist between Vercel function instances.'
+          : undefined
+      });
+    }
     if (await handleAuth(req, res, pathname, url.searchParams) !== false) return;
     if (await handleUsers(req, res, pathname) !== false) return;
     if (await handleEntities(req, res, pathname, url.searchParams) !== false) return;

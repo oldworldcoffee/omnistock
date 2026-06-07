@@ -108,7 +108,10 @@ export default function InventoryCounts() {
     setLocInv(linv);
     setStorageAreas(areas.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
     setItemAreaMappings(mappings);
-    setCounts(cnts.filter(c => accessibleLocIds.has(c.location_id)));
+    setCounts(cnts
+      .filter(c => accessibleLocIds.has(c.location_id))
+      .map(c => recoverSubmittedCount(c, linv))
+    );
     
     // Get company_id from current user
     const user = await base44.auth.me();
@@ -127,6 +130,50 @@ export default function InventoryCounts() {
   const getItemsForArea = (areaId) => {
     const itemIds = itemAreaMappings.filter(m => m.storage_area_id === areaId).map(m => m.item_id);
     return items.filter(i => itemIds.includes(i.id));
+  };
+
+  const hasRecordedQuantity = (row) => {
+    if (Number(row.counted_quantity || 0) !== 0) return true;
+    if (Object.values(row.unit_inputs || {}).some(value => Number(value || 0) !== 0)) return true;
+    return (row.area_counts || []).some(ac =>
+      Number(ac.quantity || 0) !== 0 ||
+      Object.values(ac.unit_inputs || {}).some(value => Number(value || 0) !== 0)
+    );
+  };
+
+  const recoverSubmittedCount = (count, inventoryRows = locInv) => {
+    if (count.status !== 'submitted' || !Array.isArray(count.items) || count.items.length === 0) return count;
+    if (count.items.some(hasRecordedQuantity)) return count;
+
+    const inventoryByItem = new Map(
+      inventoryRows
+        .filter(row => row.location_id === count.location_id)
+        .map(row => [row.item_id, row])
+    );
+    let recoveredAny = false;
+
+    const recoveredItems = count.items.map(row => {
+      if (row.has_variants && Array.isArray(row.grouped_items)) {
+        const unitInputs = { ...(row.unit_inputs || {}) };
+        const total = row.grouped_items.reduce((sum, variant) => {
+          const quantity = Number(inventoryByItem.get(variant.item_id)?.on_hand_quantity || 0);
+          if (quantity !== 0) {
+            recoveredAny = true;
+            unitInputs[variant.variant_name] = quantity;
+          }
+          return sum + quantity;
+        }, 0);
+        return { ...row, counted_quantity: total, unit_inputs: unitInputs };
+      }
+
+      const quantity = Number(inventoryByItem.get(row.item_id)?.on_hand_quantity || 0);
+      if (quantity !== 0) recoveredAny = true;
+      return { ...row, counted_quantity: quantity };
+    });
+
+    return recoveredAny
+      ? { ...count, items: recoveredItems, recovered_from_location_inventory: true }
+      : count;
   };
 
   const startCount = async (status = 'draft') => {
@@ -287,7 +334,7 @@ export default function InventoryCounts() {
 
   const viewCount = async (count) => {
     const freshCount = await base44.entities.InventoryCount.get(count.id);
-    setActiveCount(freshCount);
+    setActiveCount(recoverSubmittedCount(freshCount));
     setActiveAreaIdx(0);
   };
 
@@ -408,10 +455,18 @@ export default function InventoryCounts() {
     try {
       const selectedLocation = locations.find(l => l.id === activeCount.location_id);
       const countCompanyId = selectedLocation?.company_id || companyId;
+      const submittedItems = activeCount.items.map(row => ({
+        ...row,
+        previous_quantity: Number(row.previous_quantity || 0),
+        counted_quantity: Number(row.counted_quantity || 0),
+        area_counts: Array.isArray(row.area_counts)
+          ? row.area_counts.map(ac => ({ ...ac, quantity: Number(ac.quantity || 0) }))
+          : row.area_counts,
+      }));
       
       // First, persist area assignments to ItemStorageArea
       const areaAssignments = [];
-      for (const row of activeCount.items) {
+      for (const row of submittedItems) {
         if (row.area_counts && row.area_counts.length > 0) {
           for (const ac of row.area_counts) {
             const area = storageAreas.find(a => a.id === ac.area_id);
@@ -444,7 +499,7 @@ export default function InventoryCounts() {
       
       // Aggregate quantities by item_id for ALL items (including zeros)
       // We write every item so that zeroing out a count actually clears old values
-      for (const row of activeCount.items) {
+      for (const row of submittedItems) {
         // Skip parent group rows - aggregate from grouped_items instead
         if (row.has_variants && row.grouped_items) continue;
         
@@ -455,7 +510,7 @@ export default function InventoryCounts() {
       }
       
       // Handle grouped items - sum variant counts by variant label
-      for (const row of activeCount.items) {
+      for (const row of submittedItems) {
         if (!row.has_variants || !row.grouped_items) continue;
         
         const unitInputs = row.unit_inputs || {};
@@ -504,6 +559,7 @@ export default function InventoryCounts() {
         companyId: countCompanyId,
         itemQtyMap,
         locInvMap,
+        items: submittedItems,
       });
       
       toast.success(`Updated ${result.data.updated + result.data.created} inventory records`);
