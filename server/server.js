@@ -599,6 +599,73 @@ const getEntityRows = (db, entityName) => {
 
 const getEntityRecord = (db, entityName, id) => getEntityRows(db, entityName).find((row) => row.id === id);
 
+const countRowHasRecordedQuantity = (row) => {
+  if (Number(row.counted_quantity || 0) !== 0) return true;
+  if (Object.values(row.unit_inputs || {}).some((value) => Number(value || 0) !== 0)) return true;
+  return (row.area_counts || []).some((areaCount) => (
+    Number(areaCount.quantity || 0) !== 0 ||
+    Object.values(areaCount.unit_inputs || {}).some((value) => Number(value || 0) !== 0)
+  ));
+};
+
+const repairSubmittedInventoryCount = (db, count) => {
+  if (count?.status !== 'submitted' || !Array.isArray(count.items) || count.items.length === 0) return count;
+  if (count.items.some(countRowHasRecordedQuantity)) return count;
+
+  const inventoryByItem = new Map(
+    db.entities.LocationInventory
+      .filter((row) => row.location_id === count.location_id)
+      .map((row) => [row.item_id, row])
+  );
+  let recoveredAny = false;
+
+  const repairedItems = count.items.map((row) => {
+    if (row.has_variants && Array.isArray(row.grouped_items)) {
+      const unitInputs = {};
+      const total = row.grouped_items.reduce((sum, variant) => {
+        const quantity = Number(inventoryByItem.get(variant.item_id)?.on_hand_quantity || 0);
+        if (quantity !== 0) {
+          recoveredAny = true;
+          unitInputs[variant.variant_name] = quantity;
+        }
+        return sum + quantity;
+      }, 0);
+      const areaCounts = Array.isArray(row.area_counts) && row.area_counts.length > 0
+        ? row.area_counts.map((areaCount, index) => index === 0
+          ? {
+            ...areaCount,
+            quantity: total,
+            unit_inputs: { ...(areaCount.unit_inputs || {}), ...unitInputs }
+          }
+          : areaCount)
+        : row.area_counts;
+      return {
+        ...row,
+        counted_quantity: total,
+        unit_inputs: Object.keys(unitInputs).length ? unitInputs : row.unit_inputs,
+        area_counts: areaCounts
+      };
+    }
+
+    const quantity = Number(inventoryByItem.get(row.item_id)?.on_hand_quantity || 0);
+    if (quantity !== 0) recoveredAny = true;
+    const areaCounts = Array.isArray(row.area_counts) && row.area_counts.length > 0
+      ? row.area_counts.map((areaCount, index) => index === 0 ? { ...areaCount, quantity } : areaCount)
+      : row.area_counts;
+    return {
+      ...row,
+      counted_quantity: quantity,
+      area_counts: areaCounts
+    };
+  });
+
+  if (!recoveredAny) return count;
+  count.items = repairedItems;
+  count.recovered_from_location_inventory = true;
+  count.updated_date = nowIso();
+  return count;
+};
+
 const createRecord = (db, entityName, body, user) => {
   if (!db.entities[entityName]) throw new Error(`Unknown entity "${entityName}"`);
   const id = makeId(entityName);
@@ -1407,6 +1474,30 @@ const handleEntities = async (req, res, pathname, searchParams) => {
   const db = await loadDb();
   const user = currentUser(db, req);
   if (!user) return sendJson(res, 401, { error: 'Unauthorized' });
+
+  if (req.method === 'GET' && entityName === 'InventoryCount') {
+    const result = await withDb(async (writeDb) => {
+      const writeUser = currentUser(writeDb, req);
+      if (!writeUser) throw new Error('Unauthorized');
+
+      if (id) {
+        const record = getEntityRecord(writeDb, entityName, id);
+        return record ? repairSubmittedInventoryCount(writeDb, record) : null;
+      }
+
+      let rows = getEntityRows(writeDb, entityName).map((row) => repairSubmittedInventoryCount(writeDb, row));
+      const filters = parseQueryJson(searchParams.get('filter'), {});
+      const sort = searchParams.get('sort') || '';
+      const limit = Number(searchParams.get('limit') || 0);
+      rows = rows.filter((row) => matchesFilter(row, filters));
+      rows = sortRows(rows, sort);
+      if (limit > 0) rows = rows.slice(0, limit);
+      return rows;
+    });
+
+    if (id && !result) return sendJson(res, 404, { error: 'Not found' });
+    return sendJson(res, 200, result);
+  }
 
   if (req.method === 'GET' && !id) {
     let rows = getEntityRows(db, entityName);
