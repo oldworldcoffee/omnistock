@@ -1,0 +1,161 @@
+{
+  "name": "Vendor",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this vendor belongs to"
+    },
+    "name": {
+      "type": "string"
+    },
+    "order_type": {
+      "type": "string",
+      "enum": [
+        "email",
+        "online",
+        "instore",
+        "no_orders"
+      ],
+      "default": "email",
+      "description": "How orders are placed with this vendor: email order, online only, in-store grocery run, or not for orders"
+    },
+    "contact_name": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    },
+    "is_commissary": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this vendor acts as a commissary/warehouse that fulfills retail location orders"
+    },
+    "authorized_location_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Location IDs authorized to order from this vendor. Empty/null means all locations."
+    },
+    "default_order_email": {
+      "type": "string"
+    },
+    "default_cc_email": {
+      "type": "string"
+    },
+    "default_min_order_type": {
+      "type": "string",
+      "enum": [
+        "none",
+        "dollar",
+        "cases"
+      ],
+      "default": "none"
+    },
+    "default_min_order_value": {
+      "type": "number"
+    },
+    "default_delivery_days": {
+      "type": "array",
+      "description": "Default delivery schedule for all locations (can be overridden per location)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "description": "e.g. Monday"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "cutoff_day": {
+            "type": "string",
+            "description": "Day order must be placed by"
+          },
+          "cutoff_time": {
+            "type": "string",
+            "description": "Time order must be placed by (e.g. 5:00 PM)"
+          }
+        }
+      }
+    },
+    "location_settings": {
+      "type": "array",
+      "description": "Per-location order settings for this vendor",
+      "items": {
+        "type": "object",
+        "properties": {
+          "location_id": {
+            "type": "string"
+          },
+          "order_email": {
+            "type": "string",
+            "description": "Order email specific to this location"
+          },
+          "cc_email": {
+            "type": "string",
+            "description": "CC email for orders from this location"
+          },
+          "min_order_type": {
+            "type": "string",
+            "enum": [
+              "none",
+              "dollar",
+              "cases"
+            ],
+            "default": "none",
+            "description": "Type of minimum order requirement"
+          },
+          "min_order_value": {
+            "type": "number",
+            "description": "Minimum order value (dollars or case count)"
+          },
+          "delivery_days": {
+            "type": "array",
+            "description": "Delivery schedule per day of week",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string",
+                  "description": "e.g. Monday"
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "cutoff_day": {
+                  "type": "string",
+                  "description": "Day order must be placed by"
+                },
+                "cutoff_time": {
+                  "type": "string",
+                  "description": "Time order must be placed by (e.g. 5:00 PM)"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "name",
+    "company_id"
+  ]
+}

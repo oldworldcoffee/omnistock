@@ -1,0 +1,156 @@
+{
+  "name": "InventoryItem",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this item belongs to"
+    },
+    "name": {
+      "type": "string"
+    },
+    "sku": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "unit_of_measure": {
+      "type": "string"
+    },
+    "unit_cost": {
+      "type": "number"
+    },
+    "is_commissary_item": {
+      "type": "boolean",
+      "default": false
+    },
+    "commissary_price": {
+      "type": "number"
+    },
+    "commissary_vendor_id": {
+      "type": "string",
+      "description": "The commissary vendor ID that supplies this item to retail locations"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    },
+    "description": {
+      "type": "string"
+    },
+    "vendor_id": {
+      "type": "string"
+    },
+    "inner_pack_units": {
+      "type": "number",
+      "description": "Number of base units per inner pack (e.g. 50 EA per sleeve)"
+    },
+    "inner_pack_name": {
+      "type": "string",
+      "description": "Name of the inner pack (e.g. Sleeve, Tray, Bag)"
+    },
+    "packs_per_case": {
+      "type": "number",
+      "description": "Number of inner packs per case (e.g. 20 sleeves per case)"
+    },
+    "count_units": {
+      "type": "array",
+      "description": "Which units are enabled for counting this item",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "multiplier": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "purchase_options": {
+      "type": "array",
+      "description": "Multiple vendor purchase options for this item",
+      "items": {
+        "type": "object",
+        "properties": {
+          "vendor_id": {
+            "type": "string"
+          },
+          "vendor_name": {
+            "type": "string"
+          },
+          "product_name": {
+            "type": "string"
+          },
+          "product_code": {
+            "type": "string"
+          },
+          "pack_size": {
+            "type": "string",
+            "description": "e.g. 6x10oz, 12 pack"
+          },
+          "unit_cost": {
+            "type": "number"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "is_preferred": {
+            "type": "boolean",
+            "default": false
+          },
+          "notes": {
+            "type": "string"
+          },
+          "inner_pack_units": {
+            "type": "number",
+            "description": "Number of base units per inner pack"
+          },
+          "inner_pack_name": {
+            "type": "string",
+            "description": "Name of the inner pack (e.g. Sleeve, Tray, Bag)"
+          },
+          "packs_per_case": {
+            "type": "number",
+            "description": "Number of inner packs per case"
+          },
+          "location_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Location IDs this option is available for (null = all)"
+          },
+          "product_url": {
+            "type": "string",
+            "description": "Direct product page URL for online ordering"
+          },
+          "product_image_url": {
+            "type": "string",
+            "description": "Product image URL (auto-scraped or manually added)"
+          }
+        }
+      }
+    },
+    "ai_suggested_par": {
+      "type": "number",
+      "description": "AI-calculated par based on usage trends"
+    },
+    "minimum_reorder_volume": {
+      "type": "number",
+      "description": "Minimum qty below which system flags urgent reorder"
+    },
+    "last_par_calculation_date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When smart pars were last calculated"
+    }
+  },
+  "required": [
+    "name",
+    "unit_of_measure",
+    "company_id"
+  ]
+}

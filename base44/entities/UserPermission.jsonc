@@ -1,0 +1,72 @@
+{
+  "name": "UserPermission",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this user belongs to"
+    },
+    "user_id": {
+      "type": "string",
+      "description": "The user this permission belongs to (or invite email if pending)"
+    },
+    "email": {
+      "type": "string",
+      "description": "Email of the invited user"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "admin",
+        "manager",
+        "staff"
+      ],
+      "default": "staff"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "pending"
+      ],
+      "default": "pending"
+    },
+    "permissions": {
+      "type": "object",
+      "description": "Permission flags",
+      "properties": {
+        "master_catalog": {
+          "type": "boolean",
+          "default": false
+        },
+        "hq_reports": {
+          "type": "boolean",
+          "default": false
+        },
+        "all_locations": {
+          "type": "boolean",
+          "default": false
+        },
+        "location_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific location IDs this user can access"
+        }
+      }
+    },
+    "invited_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "full_name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "email",
+    "role",
+    "company_id"
+  ]
+}

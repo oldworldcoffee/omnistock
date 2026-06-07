@@ -1,0 +1,118 @@
+{
+  "name": "CommissaryFulfillment",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this fulfillment belongs to"
+    },
+    "order_id": {
+      "type": "string",
+      "description": "The retail location's order ID being fulfilled"
+    },
+    "order_number": {
+      "type": "string",
+      "description": "Reference to the original order number"
+    },
+    "retail_location_id": {
+      "type": "string",
+      "description": "The retail location that placed the order"
+    },
+    "commissary_location_id": {
+      "type": "string",
+      "description": "The commissary location fulfilling the order"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "quantity_ordered": {
+            "type": "number"
+          },
+          "quantity_fulfilled": {
+            "type": "number",
+            "description": "Actual quantity being fulfilled (may be less than ordered)"
+          },
+          "unit_cost": {
+            "type": "number",
+            "description": "Final unit cost (may differ from order if adjusted)"
+          },
+          "total_cost": {
+            "type": "number"
+          },
+          "notes": {
+            "type": "string",
+            "description": "Reason for partial fulfillment or price adjustment"
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "partial",
+        "fulfilled",
+        "cancelled",
+        "split_pending"
+      ],
+      "default": "pending"
+    },
+    "fulfillment_date": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "is_split_invoice": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this is a split invoice from a partial fulfillment"
+    },
+    "parent_fulfillment_id": {
+      "type": "string",
+      "description": "ID of the original fulfillment if this is a split"
+    },
+    "remaining_items": {
+      "type": "array",
+      "description": "Items still waiting to be fulfilled (for split invoices)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "quantity_remaining": {
+            "type": "number"
+          },
+          "unit_cost": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "order_id",
+    "retail_location_id",
+    "commissary_location_id",
+    "company_id"
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "name": "Transfer",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this transfer belongs to"
+    },
+    "transfer_number": {
+      "type": "string"
+    },
+    "from_location_id": {
+      "type": "string"
+    },
+    "to_location_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_transit",
+        "received",
+        "cancelled"
+      ],
+      "default": "pending"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    },
+    "dispatched_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "from_location_id",
+    "to_location_id",
+    "company_id"
+  ]
+}

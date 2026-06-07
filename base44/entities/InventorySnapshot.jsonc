@@ -1,0 +1,44 @@
+{
+  "name": "InventorySnapshot",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this snapshot belongs to"
+    },
+    "snapshot_date": {
+      "type": "string",
+      "format": "date",
+      "description": "The date this snapshot represents (as-of date)"
+    },
+    "location_id": {
+      "type": "string",
+      "description": "Location ID this snapshot is for"
+    },
+    "item_id": {
+      "type": "string",
+      "description": "Item ID this snapshot is for"
+    },
+    "quantity_on_hand": {
+      "type": "number",
+      "default": 0,
+      "description": "Quantity on hand at snapshot time"
+    },
+    "unit_cost": {
+      "type": "number",
+      "default": 0,
+      "description": "Unit cost at snapshot time"
+    },
+    "inventory_value": {
+      "type": "number",
+      "default": 0,
+      "description": "Pre-calculated inventory value (quantity * unit_cost)"
+    }
+  },
+  "required": [
+    "snapshot_date",
+    "location_id",
+    "item_id",
+    "company_id"
+  ]
+}

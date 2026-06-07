@@ -1,0 +1,103 @@
+{
+  "name": "Order",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this order belongs to"
+    },
+    "order_number": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "vendor",
+        "commissary"
+      ],
+      "default": "vendor"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "sent",
+        "viewed",
+        "backstocked",
+        "received",
+        "fulfilled",
+        "cancelled"
+      ],
+      "default": "draft"
+    },
+    "location_id": {
+      "type": "string"
+    },
+    "vendor_id": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "quantity_ordered": {
+            "type": "number"
+          },
+          "quantity_received": {
+            "type": "number"
+          },
+          "unit_cost": {
+            "type": "number"
+          },
+          "total_cost": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "total_amount": {
+      "type": "number"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "backstock_note": {
+      "type": "string",
+      "description": "Note explaining backstock/waiting status"
+    },
+    "email_sent_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "email_read_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sent_to_email": {
+      "type": "string"
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "viewed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "type",
+    "location_id",
+    "company_id"
+  ]
+}

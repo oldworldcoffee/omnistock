@@ -1,0 +1,33 @@
+{
+  "name": "LocationInventory",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this inventory record belongs to"
+    },
+    "location_id": {
+      "type": "string"
+    },
+    "item_id": {
+      "type": "string"
+    },
+    "on_hand_quantity": {
+      "type": "number",
+      "default": 0
+    },
+    "par_level": {
+      "type": "number",
+      "default": 0
+    },
+    "reorder_point": {
+      "type": "number",
+      "default": 0
+    }
+  },
+  "required": [
+    "location_id",
+    "item_id",
+    "company_id"
+  ]
+}

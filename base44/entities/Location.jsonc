@@ -1,0 +1,49 @@
+{
+  "name": "Location",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this location belongs to"
+    },
+    "name": {
+      "type": "string",
+      "description": "Location name"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "location",
+        "commissary"
+      ],
+      "default": "location"
+    },
+    "business_name": {
+      "type": "string",
+      "description": "Company/business name (e.g., Old World Coffee Roasters)"
+    },
+    "address": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    },
+    "preferred_stock_weeks": {
+      "type": "number",
+      "description": "Target stock buffer in weeks (e.g., 1, 2, 3, 4)",
+      "default": 2
+    }
+  },
+  "required": [
+    "name",
+    "type",
+    "company_id"
+  ]
+}

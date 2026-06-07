@@ -1,0 +1,92 @@
+{
+  "name": "InventoryCount",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this count belongs to"
+    },
+    "location_id": {
+      "type": "string"
+    },
+    "count_type": {
+      "type": "string",
+      "enum": [
+        "full",
+        "spot"
+      ],
+      "default": "full"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "in_progress",
+        "submitted"
+      ],
+      "default": "in_progress"
+    },
+    "categories": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "For spot counts"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "unit_of_measure": {
+            "type": "string"
+          },
+          "previous_quantity": {
+            "type": "number"
+          },
+          "counted_quantity": {
+            "type": "number"
+          },
+          "area_counts": {
+            "type": "array",
+            "description": "Per storage area breakdown",
+            "items": {
+              "type": "object",
+              "properties": {
+                "area_id": {
+                  "type": "string"
+                },
+                "area_name": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "submitted_by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "location_id",
+    "count_type",
+    "company_id"
+  ]
+}

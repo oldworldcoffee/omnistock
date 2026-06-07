@@ -1,0 +1,58 @@
+{
+  "name": "CompanySettings",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Unique company ID (this is the primary identifier for the company)"
+    },
+    "company_name": {
+      "type": "string",
+      "description": "Default company/business name for the organization"
+    },
+    "logo_url": {
+      "type": "string",
+      "description": "Company logo URL"
+    },
+    "billing_email": {
+      "type": "string",
+      "description": "Email address for billing communications"
+    },
+    "billing_address": {
+      "type": "string",
+      "description": "Billing address"
+    },
+    "billing_phone": {
+      "type": "string",
+      "description": "Billing phone number"
+    },
+    "tax_id": {
+      "type": "string",
+      "description": "Tax ID or EIN"
+    },
+    "subscription_plan": {
+      "type": "string",
+      "enum": [
+        "starter",
+        "professional",
+        "enterprise"
+      ],
+      "default": "starter",
+      "description": "Current subscription plan"
+    },
+    "subscription_status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "cancelled",
+        "past_due",
+        "trial"
+      ],
+      "default": "trial",
+      "description": "Subscription status"
+    }
+  },
+  "required": [
+    "company_id"
+  ]
+}

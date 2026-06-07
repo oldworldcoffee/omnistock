@@ -1,0 +1,77 @@
+{
+  "name": "Invoice",
+  "type": "object",
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "description": "Company ID this invoice belongs to"
+    },
+    "location_id": {
+      "type": "string"
+    },
+    "vendor_id": {
+      "type": "string"
+    },
+    "vendor_name": {
+      "type": "string"
+    },
+    "invoice_number": {
+      "type": "string"
+    },
+    "invoice_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "image_url": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending_review",
+        "confirmed",
+        "rejected"
+      ],
+      "default": "pending_review"
+    },
+    "extracted_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "number"
+          },
+          "unit_cost": {
+            "type": "number"
+          },
+          "total_cost": {
+            "type": "number"
+          },
+          "matched": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "total_amount": {
+      "type": "number"
+    },
+    "order_id": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "location_id",
+    "company_id"
+  ]
+}
