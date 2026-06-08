@@ -15,7 +15,6 @@ export default function Transfers() {
   const { canAccessLocation } = useAuth();
   const [locations, setLocations] = useState([]);
   const [items, setItems] = useState([]);
-  const [locInv, setLocInv] = useState([]);
   const [transfers, setTransfers] = useState([]);
   const [newDialog, setNewDialog] = useState(false);
   const [viewDialog, setViewDialog] = useState(null);
@@ -32,16 +31,14 @@ export default function Transfers() {
   const load = () => Promise.all([
     base44.entities.Location.list(),
     base44.entities.InventoryItem.filter({ is_active: true }),
-    base44.entities.LocationInventory.list(),
     base44.entities.Transfer.list('-created_date', 50),
-  ]).then(([locs, itms, linv, trans]) => {
+  ]).then(([locs, itms, trans]) => {
     const accessibleLocs = locs.filter(l => canAccessLocation(l.id));
     const accessibleLocIds = new Set(accessibleLocs.map(l => l.id));
     setAllLocations(locs); // all locations for form dropdowns
     setLocations(accessibleLocs); // only accessible for display/names
     setCompanyId(locs[0]?.company_id || ''); // Get company ID from first location
     setItems(itms);
-    setLocInv(linv);
     // Filter history to only show transfers involving the user's locations
     setTransfers(trans.filter(t => accessibleLocIds.has(t.from_location_id) || accessibleLocIds.has(t.to_location_id)));
     setLoading(false);
@@ -103,45 +100,18 @@ export default function Transfers() {
       alert('Quantities cannot be negative');
       return;
     }
-    const transfer = await base44.entities.Transfer.create({
+    await base44.functions.invoke('submitTransfer', {
       company_id: companyId,
       ...form,
-      status: immediate ? 'received' : 'in_transit',
-      transfer_number: `TR-${Date.now().toString().slice(-6)}`,
-      dispatched_at: new Date().toISOString(),
-      received_at: immediate ? new Date().toISOString() : null,
+      immediate,
     });
-    // Deduct from source
-    for (const item of form.items) {
-      const li = locInv.find(l => l.location_id === form.from_location_id && l.item_id === item.item_id);
-      if (li) {
-        const newQty = Math.max(0, (li.on_hand_quantity || 0) - item.quantity);
-        await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-      }
-    }
-    // If immediate, add to destination
-    if (immediate) {
-      for (const item of form.items) {
-        const li = locInv.find(l => l.location_id === form.to_location_id && l.item_id === item.item_id);
-        const newQty = (li?.on_hand_quantity || 0) + item.quantity;
-        if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-        else await base44.entities.LocationInventory.create({ company_id: companyId, location_id: form.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
-      }
-    }
     await load();
     setNewDialog(false);
     setForm({ from_location_id: '', to_location_id: '', items: [], notes: '' });
   };
 
   const receiveTransfer = async (transfer) => {
-    await base44.entities.Transfer.update(transfer.id, { status: 'received', received_at: new Date().toISOString() });
-    // Add to destination
-    for (const item of (transfer.items || [])) {
-      const li = locInv.find(l => l.location_id === transfer.to_location_id && l.item_id === item.item_id);
-      const newQty = (li?.on_hand_quantity || 0) + item.quantity;
-      if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-      else await base44.entities.LocationInventory.create({ company_id: companyId, location_id: transfer.to_location_id, item_id: item.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
-    }
+    await base44.functions.invoke('receiveTransfer', { transferId: transfer.id });
     await load();
     setViewDialog(null);
   };

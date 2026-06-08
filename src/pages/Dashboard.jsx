@@ -41,7 +41,7 @@ export default function Dashboard() {
 
   const totalValue = locInv.reduce((sum, li) => {
     const item = items.find(i => i.id === li.item_id);
-    return sum + (li.on_hand_quantity || 0) * (item?.unit_cost || 0);
+    return sum + (Number.isFinite(Number(li.inventory_value)) ? Number(li.inventory_value) : (li.on_hand_quantity || 0) * (item?.unit_cost || 0));
   }, 0);
 
   const lowStockCount = locInv.filter(li => {
@@ -57,7 +57,7 @@ export default function Dashboard() {
       .filter(li => li.location_id === loc.id)
       .reduce((sum, li) => {
         const item = items.find(i => i.id === li.item_id);
-        return sum + (li.on_hand_quantity || 0) * (item?.unit_cost || 0);
+        return sum + (Number.isFinite(Number(li.inventory_value)) ? Number(li.inventory_value) : (li.on_hand_quantity || 0) * (item?.unit_cost || 0));
       }, 0);
     return { ...loc, value: val };
   });

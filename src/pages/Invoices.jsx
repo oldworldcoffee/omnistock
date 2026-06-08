@@ -16,7 +16,6 @@ export default function Invoices() {
   const isMobile = useIsMobile();
   const [locations, setLocations] = useState([]);
   const [items, setItems] = useState([]);
-  const [locInv, setLocInv] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [uploadDialog, setUploadDialog] = useState(false);
   const [reviewDialog, setReviewDialog] = useState(null);
@@ -30,12 +29,10 @@ export default function Invoices() {
   const load = () => Promise.all([
     base44.entities.Location.list(),
     base44.entities.InventoryItem.filter({ is_active: true }),
-    base44.entities.LocationInventory.list(),
     base44.entities.Invoice.list('-created_date', 50),
-  ]).then(([locs, itms, linv, invs]) => {
+  ]).then(([locs, itms, invs]) => {
     setLocations(locs.filter(l => canAccessLocation(l.id)));
     setItems(itms);
-    setLocInv(linv);
     setInvoices(invs);
     setLoading(false);
   });
@@ -109,35 +106,17 @@ export default function Invoices() {
 
   const confirmInvoice = async () => {
     setConfirming(true);
-    await base44.entities.Invoice.update(reviewDialog.id, {
-      status: 'confirmed',
-      extracted_items: reviewDialog.extracted_items,
-    });
-    // Update stock levels for matched items
-    for (const row of reviewDialog.extracted_items) {
-      if (!row.item_id) continue;
-      const li = locInv.find(l => l.location_id === reviewDialog.location_id && l.item_id === row.item_id);
-      const newQty = (li?.on_hand_quantity || 0) + (row.quantity || 0);
-      if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-      else await base44.entities.LocationInventory.create({ location_id: reviewDialog.location_id, item_id: row.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
+    try {
+      await base44.functions.invoke('confirmInvoice', {
+        invoiceId: reviewDialog.id,
+        extracted_items: reviewDialog.extracted_items,
+        invoice_date: reviewDialog.invoice_date,
+      });
+      await load();
+      setReviewDialog(null);
+    } finally {
+      setConfirming(false);
     }
-    // Update related commissary order status to 'received'
-    if (reviewDialog.order_id) {
-      try {
-        const order = await base44.entities.Order.get(reviewDialog.order_id);
-        if (order && order.type === 'commissary') {
-          await base44.entities.Order.update(reviewDialog.order_id, {
-            status: 'received',
-            received_at: new Date().toISOString()
-          });
-        }
-      } catch (err) {
-        console.error('Failed to update order status:', err);
-      }
-    }
-    await load();
-    setReviewDialog(null);
-    setConfirming(false);
   };
 
   const rejectInvoice = async () => {

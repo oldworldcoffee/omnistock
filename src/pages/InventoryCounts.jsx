@@ -143,6 +143,7 @@ export default function InventoryCounts() {
 
   const recoverSubmittedCount = (count, inventoryRows = locInv) => {
     if (count.status !== 'submitted' || !Array.isArray(count.items) || count.items.length === 0) return count;
+    if (count.ledger_backed) return count;
 
     const inventoryByItem = new Map(
       inventoryRows
@@ -359,13 +360,13 @@ export default function InventoryCounts() {
 
 
   // Value helper — on_hand is in base units (EA); unit_cost may be per case
-  const getItemValue = (itemId, onHand) => {
+  const getItemValue = (itemId, onHand, unitCostOverride = null) => {
     const item = items.find(i => i.id === itemId);
     if (!item || !onHand) return 0;
     const preferred = item.purchase_options?.find(o => o.is_preferred) || item.purchase_options?.[0];
     const packUnits = preferred?.inner_pack_units || item.inner_pack_units || 1;
     const packsPerCase = preferred?.packs_per_case || item.packs_per_case;
-    const unitCost = preferred?.unit_cost || item.unit_cost || 0;
+    const unitCost = unitCostOverride ?? preferred?.unit_cost ?? item.unit_cost ?? 0;
     if (packsPerCase && packUnits) return (onHand / (packUnits * packsPerCase)) * unitCost;
     if (packUnits > 1) return (onHand / packUnits) * unitCost;
     return onHand * unitCost;
@@ -387,14 +388,17 @@ export default function InventoryCounts() {
   };
 
   const getCountRowValue = (row) => {
+    if (Number.isFinite(Number(row.inventory_value))) return Number(row.inventory_value);
     const groupedQuantities = getGroupedQuantities(row);
     if (groupedQuantities) {
       const groupedValue = groupedQuantities.reduce((sum, variant) => (
-        sum + getItemValue(variant.item_id, variant.quantity)
+        sum + (Number.isFinite(Number(variant.inventory_value))
+          ? Number(variant.inventory_value)
+          : getItemValue(variant.item_id, variant.quantity, variant.average_unit_cost))
       ), 0);
       if (groupedValue > 0) return groupedValue;
     }
-    return getItemValue(row.item_id, row.counted_quantity || 0);
+    return getItemValue(row.item_id, row.counted_quantity || 0, row.average_unit_cost);
   };
 
   const getCountTotalValue = (count) => (count.items || []).reduce((sum, row) => sum + getCountRowValue(row), 0);
@@ -799,7 +803,7 @@ export default function InventoryCounts() {
                            </div>
                            <div className="flex items-center justify-between text-xs pt-2 border-t border-border">
                              <span className="text-muted-foreground">Previous: {row.previous_quantity}</span>
-                             <span className="font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</span>
+                             <span className="font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</span>
                            </div>
                          </div>
                          {!isSubmitted && areas.length > 0 && (
@@ -909,7 +913,7 @@ export default function InventoryCounts() {
                               </div>
                             )}
                           </td>
-                          <td className={`${isMobile ? 'px-2 py-2 text-xs' : 'px-4 py-2.5'} font-medium text-green-700`}>${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</td>
+                          <td className={`${isMobile ? 'px-2 py-2 text-xs' : 'px-4 py-2.5'} font-medium text-green-700`}>${getCountRowValue(row).toFixed(2)}</td>
                           <td className="px-4 py-2.5">
                             {hasAreas && !isSubmitted && areas.length > 0 && (
                               <div className="relative" data-area-selector>
@@ -969,7 +973,7 @@ export default function InventoryCounts() {
                           return row.item_name.toLowerCase().includes(search) || 
                                  (row.category && row.category.toLowerCase().includes(search));
                         })
-                        .reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity), 0).toFixed(2)}</td>
+                        .reduce((s, r) => s + getCountRowValue(r), 0).toFixed(2)}</td>
                     </tr>
                   </tfoot>
                 </table>
@@ -1010,7 +1014,7 @@ export default function InventoryCounts() {
                          </div>
                          <div className="flex items-center justify-between text-xs pt-2 border-t border-border">
                            <span className="text-muted-foreground">Previous: {row.previous_quantity}</span>
-                           <span className="font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</span>
+                           <span className="font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</span>
                          </div>
                        </div>
                      );
@@ -1065,7 +1069,7 @@ export default function InventoryCounts() {
                                   </div>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</td>
+                              <td className="px-4 py-2.5 font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</td>
                             </tr>
                             {hasVariants && isExpanded && row.grouped_items?.map((variant) => {
                               const variantLabel = variant.variant_name;
@@ -1091,7 +1095,7 @@ export default function InventoryCounts() {
                     <tfoot className="bg-muted/30 border-t border-border">
                       <tr>
                         <td colSpan={4} className="px-4 py-2.5 text-sm font-semibold text-right text-muted-foreground">Subtotal:</td>
-                        <td className="px-4 py-2.5 font-bold text-green-700">${unassignedItems.filter(row => { if (!unallocatedSearch.trim()) return true; const s = unallocatedSearch.toLowerCase(); return row.item_name.toLowerCase().includes(s) || (row.category && row.category.toLowerCase().includes(s)); }).reduce((s, r) => s + getItemValue(r.item_id, r.counted_quantity), 0).toFixed(2)}</td>
+                        <td className="px-4 py-2.5 font-bold text-green-700">${unassignedItems.filter(row => { if (!unallocatedSearch.trim()) return true; const s = unallocatedSearch.toLowerCase(); return row.item_name.toLowerCase().includes(s) || (row.category && row.category.toLowerCase().includes(s)); }).reduce((s, r) => s + getCountRowValue(r), 0).toFixed(2)}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -1350,7 +1354,7 @@ export default function InventoryCounts() {
                         </div>
                         <div className="flex items-center justify-between text-xs pt-1">
                           <span className="text-muted-foreground">Previous: {row.previous_quantity}</span>
-                          <span className="font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</span>
+                          <span className="font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</span>
                         </div>
                       </div>
                     ))}
@@ -1382,7 +1386,7 @@ export default function InventoryCounts() {
                           })}
                           <td className="px-4 py-2.5 font-bold text-primary">{row.counted_quantity}</td>
                           <td className="px-4 py-2.5 text-muted-foreground">{row.previous_quantity}</td>
-                          <td className="px-4 py-2.5 font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</td>
+                          <td className="px-4 py-2.5 font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1431,7 +1435,7 @@ export default function InventoryCounts() {
                     </div>
                     <div className="flex items-center justify-between text-xs pt-2 border-t border-border">
                       <span className="text-muted-foreground">Previous: {row.previous_quantity}</span>
-                      <span className="font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</span>
+                      <span className="font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</span>
                     </div>
                   </div>
                 );
@@ -1490,7 +1494,7 @@ export default function InventoryCounts() {
                         )}
                       </td>
                       <td className="px-4 py-2.5 text-muted-foreground">{row.unit_of_measure}</td>
-                      <td className="px-4 py-2.5 font-medium text-green-700">${getItemValue(row.item_id, row.counted_quantity).toFixed(2)}</td>
+                      <td className="px-4 py-2.5 font-medium text-green-700">${getCountRowValue(row).toFixed(2)}</td>
                       </tr>
                       );
                       })}
@@ -1528,7 +1532,7 @@ export default function InventoryCounts() {
               onSave={handleMobileQtyChange}
               onNext={hasNext ? handleNextItem : null}
               isSubmitted={activeCount?.status === 'submitted'}
-              itemValue={liveItem ? getItemValue(liveItem.item_id, liveItem.counted_quantity) : 0}
+              itemValue={liveItem ? getCountRowValue(liveItem) : 0}
             />
           );
         })()}

@@ -6,6 +6,7 @@ const entityNames = [
   'CompanySettings',
   'CommissaryFulfillment',
   'InventoryCount',
+  'InventoryLedger',
   'InventoryItem',
   'InventorySnapshot',
   'Invoice',

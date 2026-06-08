@@ -32,6 +32,7 @@ const entityNames = [
   'CompanySettings',
   'CommissaryFulfillment',
   'InventoryCount',
+  'InventoryLedger',
   'InventoryItem',
   'InventorySnapshot',
   'Invoice',
@@ -51,6 +52,7 @@ const companyScopedEntities = new Set([
   'CompanySettings',
   'CommissaryFulfillment',
   'InventoryCount',
+  'InventoryLedger',
   'InventoryItem',
   'InventorySnapshot',
   'Invoice',
@@ -610,6 +612,8 @@ const countRowHasRecordedQuantity = (row) => {
 
 const repairSubmittedInventoryCount = (db, count) => {
   if (count?.status !== 'submitted' || !Array.isArray(count.items) || count.items.length === 0) return count;
+  if (count.ledger_backed) return count;
+  if ((db.entities.InventoryLedger || []).some((event) => event.source_type === 'inventory_count' && event.source_id === count.id)) return count;
   if (count.items.some(countRowHasRecordedQuantity)) return count;
 
   const inventoryByItem = new Map(
@@ -702,6 +706,496 @@ const deleteRecord = (db, entityName, id) => {
   const before = db.entities[entityName].length;
   db.entities[entityName] = db.entities[entityName].filter((row) => row.id !== id);
   return before !== db.entities[entityName].length;
+};
+
+const roundNumber = (value, decimals = 6) => {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round((number + Number.EPSILON) * factor) / factor;
+};
+
+const itemUnitCost = (db, itemId) => {
+  const item = getEntityRecord(db, 'InventoryItem', itemId);
+  const preferred = (item?.purchase_options || []).find((option) => option.is_preferred) || (item?.purchase_options || [])[0];
+  return Number(preferred?.unit_cost || item?.unit_cost || 0);
+};
+
+const normalizeEffectiveAt = (value, fallback = nowIso()) => {
+  if (!value) return fallback;
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return `${text}T12:00:00.000Z`;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
+};
+
+const ledgerTime = (event) => new Date(event.effective_at || event.created_date || 0).getTime() || 0;
+
+const ledgerRank = (event) => {
+  switch (event.event_type) {
+    case 'opening_balance':
+      return 0;
+    case 'invoice_received':
+    case 'transfer_in':
+      return 10;
+    case 'transfer_out':
+      return 20;
+    case 'count_adjustment':
+    case 'manual_adjustment':
+      return 30;
+    default:
+      return 50;
+  }
+};
+
+const sortLedgerEvents = (events) => [...events].sort((a, b) => (
+  ledgerTime(a) - ledgerTime(b) ||
+  ledgerRank(a) - ledgerRank(b) ||
+  String(a.created_date || '').localeCompare(String(b.created_date || '')) ||
+  String(a.id || '').localeCompare(String(b.id || ''))
+));
+
+const ledgerPairKey = (locationId, itemId) => `${locationId || ''}::${itemId || ''}`;
+
+const isLedgerEventBefore = (event, asOf, strictBefore) => {
+  if (!asOf) return true;
+  const eventTime = ledgerTime(event);
+  const cutoff = new Date(asOf).getTime();
+  return strictBefore ? eventTime < cutoff : eventTime <= cutoff;
+};
+
+const resolveLedgerQuantityDelta = (event, state) => {
+  if (event.event_type === 'count_adjustment' && Number.isFinite(Number(event.metadata?.counted_quantity))) {
+    return roundNumber(Number(event.metadata.counted_quantity) - Number(state.quantity || 0), 6);
+  }
+  if (event.event_type === 'manual_adjustment' && Number.isFinite(Number(event.metadata?.target_quantity))) {
+    return roundNumber(Number(event.metadata.target_quantity) - Number(state.quantity || 0), 6);
+  }
+  return Number(event.quantity_delta || 0);
+};
+
+const calculateInventoryState = (db, { locationId, itemId, asOf, strictBefore = false, stack = new Set() }) => {
+  const stackKey = `${ledgerPairKey(locationId, itemId)}::${asOf || 'latest'}::${strictBefore ? 'before' : 'through'}`;
+  if (stack.has(stackKey)) {
+    return { quantity: 0, value: 0, average_unit_cost: itemUnitCost(db, itemId) };
+  }
+  const nextStack = new Set(stack);
+  nextStack.add(stackKey);
+
+  const events = sortLedgerEvents(db.entities.InventoryLedger || [])
+    .filter((event) => event.location_id === locationId && event.item_id === itemId)
+    .filter((event) => isLedgerEventBefore(event, asOf, strictBefore));
+  const state = { quantity: 0, value: 0, average_unit_cost: 0 };
+
+  for (const event of events) {
+    const quantityDelta = resolveLedgerQuantityDelta(event, state);
+    const fallbackCost = Number(event.unit_cost || itemUnitCost(db, event.item_id) || 0);
+    let unitCost = fallbackCost;
+
+    if (['opening_balance', 'invoice_received'].includes(event.event_type)) {
+      unitCost = Number(event.unit_cost || (quantityDelta ? Number(event.value_delta || 0) / quantityDelta : 0) || fallbackCost);
+    } else if (event.event_type === 'transfer_in' && event.metadata?.source_location_id) {
+      const sourceState = calculateInventoryState(db, {
+        locationId: event.metadata.source_location_id,
+        itemId: event.item_id,
+        asOf: event.metadata.source_effective_at || event.effective_at,
+        strictBefore: true,
+        stack: nextStack
+      });
+      unitCost = Number(sourceState.average_unit_cost || fallbackCost);
+    } else {
+      unitCost = Number(state.average_unit_cost || fallbackCost);
+    }
+
+    const valueDelta = quantityDelta * unitCost;
+    state.quantity = roundNumber(state.quantity + quantityDelta, 6);
+    state.value = Math.abs(state.quantity) < 0.000001 ? 0 : roundNumber(state.value + valueDelta, 6);
+    state.average_unit_cost = state.quantity ? roundNumber(state.value / state.quantity, 6) : 0;
+  }
+
+  return state;
+};
+
+const upsertLocationInventoryBalance = (db, user, { companyId, locationId, itemId, state }) => {
+  const existing = db.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
+  const data = {
+    company_id: companyId || existing?.company_id || companyIdForUser(db, user),
+    location_id: locationId,
+    item_id: itemId,
+    on_hand_quantity: roundNumber(state.quantity, 6),
+    inventory_value: roundNumber(state.value, 6),
+    average_unit_cost: roundNumber(state.average_unit_cost, 6),
+    par_level: Number(existing?.par_level || 0),
+    reorder_point: Number(existing?.reorder_point || 0),
+    last_calculated_at: nowIso()
+  };
+
+  if (existing) return updateRecord(db, 'LocationInventory', existing.id, data);
+  return createRecord(db, 'LocationInventory', data, user);
+};
+
+const recalculateAllInventory = (db, user) => {
+  const pairMap = new Map();
+  for (const event of db.entities.InventoryLedger || []) {
+    if (!event.location_id || !event.item_id) continue;
+    pairMap.set(ledgerPairKey(event.location_id, event.item_id), {
+      locationId: event.location_id,
+      itemId: event.item_id,
+      companyId: event.company_id
+    });
+  }
+
+  let recalculated = 0;
+  for (const pair of pairMap.values()) {
+    const events = sortLedgerEvents((db.entities.InventoryLedger || [])
+      .filter((event) => event.location_id === pair.locationId && event.item_id === pair.itemId));
+    const state = { quantity: 0, value: 0, average_unit_cost: 0 };
+
+    for (const event of events) {
+      const before = { ...state };
+      const quantityDelta = resolveLedgerQuantityDelta(event, before);
+      const fallbackCost = Number(event.unit_cost || itemUnitCost(db, event.item_id) || 0);
+      let unitCost = fallbackCost;
+
+      if (['opening_balance', 'invoice_received'].includes(event.event_type)) {
+        unitCost = Number(event.unit_cost || (quantityDelta ? Number(event.value_delta || 0) / quantityDelta : 0) || fallbackCost);
+      } else if (event.event_type === 'transfer_in' && event.metadata?.source_location_id) {
+        const sourceState = calculateInventoryState(db, {
+          locationId: event.metadata.source_location_id,
+          itemId: event.item_id,
+          asOf: event.metadata.source_effective_at || event.effective_at,
+          strictBefore: true
+        });
+        unitCost = Number(sourceState.average_unit_cost || fallbackCost);
+      } else {
+        unitCost = Number(before.average_unit_cost || fallbackCost);
+      }
+
+      const valueDelta = quantityDelta * unitCost;
+      state.quantity = roundNumber(before.quantity + quantityDelta, 6);
+      state.value = Math.abs(state.quantity) < 0.000001 ? 0 : roundNumber(before.value + valueDelta, 6);
+      state.average_unit_cost = state.quantity ? roundNumber(state.value / state.quantity, 6) : 0;
+
+      event.unit_cost = roundNumber(unitCost, 6);
+      event.quantity_delta = roundNumber(quantityDelta, 6);
+      event.value_delta = roundNumber(valueDelta, 6);
+      event.quantity_before = roundNumber(before.quantity, 6);
+      event.value_before = roundNumber(before.value, 6);
+      event.average_unit_cost_before = roundNumber(before.average_unit_cost, 6);
+      event.quantity_after = roundNumber(state.quantity, 6);
+      event.value_after = roundNumber(state.value, 6);
+      event.average_unit_cost_after = roundNumber(state.average_unit_cost, 6);
+      event.updated_date = nowIso();
+    }
+
+    upsertLocationInventoryBalance(db, user, { ...pair, state });
+    recalculated += 1;
+  }
+
+  refreshSubmittedInventoryCountValues(db);
+  return recalculated;
+};
+
+const ensureOpeningBalanceLedger = (db, user, { companyId, locationId, itemId }) => {
+  if ((db.entities.InventoryLedger || []).some((event) => event.location_id === locationId && event.item_id === itemId)) return null;
+  const existing = db.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
+  const quantity = Number(existing?.on_hand_quantity || 0);
+  const unitCost = Number(existing?.average_unit_cost || (quantity ? Number(existing?.inventory_value || 0) / quantity : 0) || itemUnitCost(db, itemId) || 0);
+  if (quantity === 0) return null;
+
+  return createRecord(db, 'InventoryLedger', {
+    company_id: companyId || existing?.company_id || companyIdForUser(db, user),
+    location_id: locationId,
+    item_id: itemId,
+    event_type: 'opening_balance',
+    source_type: 'migration',
+    source_id: `opening:${locationId}:${itemId}`,
+    effective_at: '1970-01-01T00:00:00.000Z',
+    quantity_delta: quantity,
+    unit_cost: unitCost,
+    value_delta: quantity * unitCost,
+    notes: 'Opening balance seeded from Location Stock when inventory ledger was enabled.',
+    metadata: { backfilled_from_location_inventory: true }
+  }, user);
+};
+
+const replaceLedgerEventsForSource = (db, user, sourceType, sourceId, events) => {
+  db.entities.InventoryLedger = (db.entities.InventoryLedger || []).filter((event) => (
+    event.source_type !== sourceType || event.source_id !== sourceId
+  ));
+
+  for (const event of events) {
+    const isTargetAnchor = ['count_adjustment', 'manual_adjustment'].includes(event.event_type)
+      && (Number.isFinite(Number(event.metadata?.counted_quantity)) || Number.isFinite(Number(event.metadata?.target_quantity)));
+    if (!event.location_id || !event.item_id || (Number(event.quantity_delta || 0) === 0 && !isTargetAnchor)) continue;
+    ensureOpeningBalanceLedger(db, user, {
+      companyId: event.company_id,
+      locationId: event.location_id,
+      itemId: event.item_id
+    });
+    createRecord(db, 'InventoryLedger', {
+      ...event,
+      source_type: sourceType,
+      source_id: sourceId,
+      effective_at: normalizeEffectiveAt(event.effective_at),
+      metadata: event.metadata || {}
+    }, user);
+  }
+
+  return recalculateAllInventory(db, user);
+};
+
+const inventoryRowsAsOf = (db, { asOf, locationId } = {}) => {
+  const cutoff = normalizeEffectiveAt(asOf || nowIso());
+  const pairs = new Map();
+  for (const event of db.entities.InventoryLedger || []) {
+    if (locationId && event.location_id !== locationId) continue;
+    pairs.set(ledgerPairKey(event.location_id, event.item_id), {
+      company_id: event.company_id,
+      location_id: event.location_id,
+      item_id: event.item_id
+    });
+  }
+  return [...pairs.values()].map((pair) => {
+    const state = calculateInventoryState(db, {
+      locationId: pair.location_id,
+      itemId: pair.item_id,
+      asOf: cutoff
+    });
+    return {
+      ...pair,
+      as_of: cutoff,
+      on_hand_quantity: roundNumber(state.quantity, 6),
+      inventory_value: roundNumber(state.value, 6),
+      average_unit_cost: roundNumber(state.average_unit_cost, 6)
+    };
+  });
+};
+
+const setManualInventoryQuantity = (db, user, { locationId, itemId, companyId, targetQuantity, effectiveAt, notes }) => {
+  const effective = normalizeEffectiveAt(effectiveAt || nowIso());
+  ensureOpeningBalanceLedger(db, user, { companyId, locationId, itemId });
+  const before = calculateInventoryState(db, {
+    locationId,
+    itemId,
+    asOf: effective,
+    strictBefore: true
+  });
+  const quantityDelta = roundNumber(Number(targetQuantity || 0) - before.quantity, 6);
+  if (quantityDelta !== 0) {
+    createRecord(db, 'InventoryLedger', {
+      company_id: companyId || companyIdForUser(db, user),
+      location_id: locationId,
+      item_id: itemId,
+      event_type: 'manual_adjustment',
+      source_type: 'manual_adjustment',
+      source_id: makeId('manualadjustment'),
+      effective_at: effective,
+      quantity_delta: quantityDelta,
+      unit_cost: before.average_unit_cost || itemUnitCost(db, itemId),
+      notes: notes || 'Manual stock adjustment',
+      metadata: {
+        previous_quantity: before.quantity,
+        target_quantity: Number(targetQuantity || 0)
+      }
+    }, user);
+  }
+  recalculateAllInventory(db, user);
+  return db.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
+};
+
+const invoiceEffectiveAt = (invoice) => normalizeEffectiveAt(invoice.invoice_date || invoice.received_at || invoice.created_date || nowIso());
+
+const invoiceLedgerEvents = (db, invoice, items) => {
+  const companyId = invoice.company_id || firstCompany(db)?.company_id || firstCompany(db)?.id || null;
+  return (items || [])
+    .filter((row) => row.item_id && Number(row.quantity || 0) > 0)
+    .map((row, index) => {
+      const quantity = Number(row.quantity || 0);
+      const unitCost = Number(row.unit_cost || (quantity ? Number(row.total_cost || 0) / quantity : 0) || itemUnitCost(db, row.item_id) || 0);
+      return {
+        company_id: companyId,
+        location_id: invoice.location_id,
+        item_id: row.item_id,
+        event_type: 'invoice_received',
+        source_line_id: row.id || `${invoice.id}:${index}`,
+        effective_at: invoiceEffectiveAt(invoice),
+        quantity_delta: quantity,
+        unit_cost: unitCost,
+        value_delta: quantity * unitCost,
+        notes: `Invoice ${invoice.invoice_number || invoice.id}`,
+        metadata: {
+          vendor_name: invoice.vendor_name || '',
+          invoice_number: invoice.invoice_number || '',
+          item_name: row.item_name || ''
+        }
+      };
+    });
+};
+
+const rebuildInvoiceLedgerEvents = (db, user, invoice, items) => (
+  replaceLedgerEventsForSource(db, user, 'invoice', invoice.id, invoiceLedgerEvents(db, invoice, items))
+);
+
+const transferEffectiveAt = (value) => normalizeEffectiveAt(value || nowIso());
+
+const transferLedgerEvents = (db, transfer) => {
+  const events = [];
+  const companyId = transfer.company_id || firstCompany(db)?.company_id || firstCompany(db)?.id || null;
+  const dispatchedAt = transferEffectiveAt(transfer.dispatched_at || transfer.created_date);
+  const receivedAt = transferEffectiveAt(transfer.received_at || dispatchedAt);
+
+  for (const [index, item] of (transfer.items || []).entries()) {
+    const quantity = Number(item.quantity || 0);
+    if (!item.item_id || quantity <= 0) continue;
+    const lineId = item.id || `${transfer.id}:${index}`;
+    events.push({
+      company_id: companyId,
+      location_id: transfer.from_location_id,
+      item_id: item.item_id,
+      event_type: 'transfer_out',
+      source_line_id: `${lineId}:out`,
+      effective_at: dispatchedAt,
+      quantity_delta: -quantity,
+      notes: `Transfer ${transfer.transfer_number || transfer.id} dispatched`,
+      metadata: {
+        transfer_number: transfer.transfer_number || '',
+        destination_location_id: transfer.to_location_id,
+        item_name: item.item_name || ''
+      }
+    });
+
+    if (transfer.status === 'received') {
+      events.push({
+        company_id: companyId,
+        location_id: transfer.to_location_id,
+        item_id: item.item_id,
+        event_type: 'transfer_in',
+        source_line_id: `${lineId}:in`,
+        effective_at: receivedAt,
+        quantity_delta: quantity,
+        notes: `Transfer ${transfer.transfer_number || transfer.id} received`,
+        metadata: {
+          transfer_number: transfer.transfer_number || '',
+          source_location_id: transfer.from_location_id,
+          source_effective_at: dispatchedAt,
+          item_name: item.item_name || ''
+        }
+      });
+    }
+  }
+
+  return events;
+};
+
+const rebuildTransferLedgerEvents = (db, user, transfer) => (
+  replaceLedgerEventsForSource(db, user, 'transfer', transfer.id, transferLedgerEvents(db, transfer))
+);
+
+const buildCountLedgerEvents = (db, user, count, itemQtyMap, effectiveAt) => {
+  const events = [];
+  const companyId = count.company_id || companyIdForUser(db, user);
+  const effective = normalizeEffectiveAt(effectiveAt || count.submitted_at || count.created_date || nowIso());
+
+  for (const [itemId, rawQuantity] of Object.entries(itemQtyMap || {})) {
+    const countedQuantity = Number(rawQuantity || 0);
+    ensureOpeningBalanceLedger(db, user, {
+      companyId,
+      locationId: count.location_id,
+      itemId
+    });
+    const expected = calculateInventoryState(db, {
+      locationId: count.location_id,
+      itemId,
+      asOf: effective,
+      strictBefore: true
+    });
+    const quantityDelta = roundNumber(countedQuantity - expected.quantity, 6);
+    events.push({
+      company_id: companyId,
+      location_id: count.location_id,
+      item_id: itemId,
+      event_type: 'count_adjustment',
+      source_line_id: `${count.id}:${itemId}`,
+      effective_at: effective,
+      quantity_delta: quantityDelta,
+      unit_cost: expected.average_unit_cost || itemUnitCost(db, itemId),
+      notes: `Inventory count ${count.id}`,
+      metadata: {
+        expected_quantity: expected.quantity,
+        counted_quantity: countedQuantity,
+        count_type: count.count_type || ''
+      }
+    });
+  }
+
+  return events;
+};
+
+const countItemValueAsOf = (db, { locationId, itemId, quantity, effectiveAt }) => {
+  const state = calculateInventoryState(db, {
+    locationId,
+    itemId,
+    asOf: effectiveAt
+  });
+  const unitCost = Number(state.average_unit_cost || itemUnitCost(db, itemId) || 0);
+  return {
+    average_unit_cost: roundNumber(unitCost, 6),
+    inventory_value: roundNumber(Number(quantity || 0) * unitCost, 6)
+  };
+};
+
+const attachCountItemValues = (db, count, effectiveAt) => {
+  let totalValue = 0;
+  const items = (count.items || []).map((row) => {
+    if (row.has_variants && Array.isArray(row.grouped_items)) {
+      const groupedItems = row.grouped_items.map((variant) => {
+        const label = variant.variant_name;
+        const areaQuantity = (row.area_counts || []).reduce((sum, areaCount) => (
+          sum + Number(areaCount.unit_inputs?.[label] || 0)
+        ), 0);
+        const quantity = areaQuantity || Number(row.unit_inputs?.[label] || 0);
+        const value = countItemValueAsOf(db, {
+          locationId: count.location_id,
+          itemId: variant.item_id,
+          quantity,
+          effectiveAt
+        });
+        totalValue += value.inventory_value;
+        return { ...variant, ...value, counted_quantity: quantity };
+      });
+      return {
+        ...row,
+        grouped_items: groupedItems,
+        inventory_value: roundNumber(groupedItems.reduce((sum, variant) => sum + Number(variant.inventory_value || 0), 0), 6)
+      };
+    }
+
+    const value = countItemValueAsOf(db, {
+      locationId: count.location_id,
+      itemId: row.item_id,
+      quantity: row.counted_quantity || 0,
+      effectiveAt
+    });
+    totalValue += value.inventory_value;
+    return { ...row, ...value };
+  });
+
+  return {
+    items,
+    total_inventory_value: roundNumber(totalValue, 6)
+  };
+};
+
+const refreshSubmittedInventoryCountValues = (db) => {
+  for (const count of db.entities.InventoryCount || []) {
+    if (count.status !== 'submitted' || !Array.isArray(count.items)) continue;
+    const effectiveAt = normalizeEffectiveAt(count.effective_at || count.submitted_at || count.created_date || nowIso());
+    const valued = attachCountItemValues(db, count, effectiveAt);
+    count.items = valued.items;
+    count.total_inventory_value = valued.total_inventory_value;
+    count.updated_date = nowIso();
+  }
 };
 
 const importCatalog = async (db, user, fileUrl) => {
@@ -1135,45 +1629,149 @@ const functionHandlers = {
           };
         })
         : undefined;
-    let updated = 0;
-    let created = 0;
+    const submittedAt = nowIso();
 
-    for (const [itemId, rawQuantity] of Object.entries(itemQtyMap)) {
-      const quantity = Number(rawQuantity || 0);
-      const existingId = body.locInvMap?.[itemId];
-      const existing = existingId
-        ? getEntityRecord(db, 'LocationInventory', existingId)
-        : db.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
-      const data = {
-        company_id: companyId,
-        location_id: locationId,
-        item_id: itemId,
-        on_hand_quantity: quantity,
-        par_level: Number(existing?.par_level || 0),
-        reorder_point: Number(existing?.reorder_point || 0),
-        last_counted_at: nowIso()
-      };
-
-      if (existing) {
-        updateRecord(db, 'LocationInventory', existing.id, data);
-        updated += 1;
-      } else {
-        createRecord(db, 'LocationInventory', data, user);
-        created += 1;
-      }
-    }
-
+    let countRecord = existingCount;
     if (body.countId) {
-      updateRecord(db, 'InventoryCount', body.countId, {
+      countRecord = updateRecord(db, 'InventoryCount', body.countId, {
         status: 'submitted',
-        submitted_at: nowIso(),
+        submitted_at: submittedAt,
         submitted_by: user?.email || 'system',
         ...(submittedItems ? { items: submittedItems } : {})
       });
     }
 
-    return { data: { success: true, updated, created } };
+    if (!countRecord) {
+      countRecord = createRecord(db, 'InventoryCount', {
+        company_id: companyId,
+        location_id: locationId,
+        count_type: body.count_type || 'full',
+        status: 'submitted',
+        submitted_at: submittedAt,
+        submitted_by: user?.email || 'system',
+        items: submittedItems || []
+      }, user);
+    }
+
+    db.entities.InventoryLedger = (db.entities.InventoryLedger || []).filter((event) => (
+      event.source_type !== 'inventory_count' || event.source_id !== countRecord.id
+    ));
+    const countEffectiveAt = normalizeEffectiveAt(body.effectiveAt || body.effective_at || submittedAt);
+    const events = buildCountLedgerEvents(db, user, countRecord, itemQtyMap, countEffectiveAt);
+    const recalculated = replaceLedgerEventsForSource(db, user, 'inventory_count', countRecord.id, events);
+    const valuedCount = attachCountItemValues(db, countRecord, countEffectiveAt);
+    countRecord = updateRecord(db, 'InventoryCount', countRecord.id, {
+      items: valuedCount.items,
+      total_inventory_value: valuedCount.total_inventory_value,
+      effective_at: countEffectiveAt,
+      ledger_backed: true
+    });
+
+    for (const itemId of Object.keys(itemQtyMap)) {
+      const row = db.entities.LocationInventory.find((li) => li.location_id === locationId && li.item_id === itemId);
+      if (row) row.last_counted_at = submittedAt;
+    }
+
+    return {
+      data: {
+        success: true,
+        updated: Object.keys(itemQtyMap).length,
+        created: 0,
+        ledger_events: events.length,
+        recalculated
+      }
+    };
   },
+
+  confirmInvoice: async ({ db, user, body }) => {
+    const invoice = getEntityRecord(db, 'Invoice', body.invoiceId || body.invoice_id);
+    if (!invoice) throw new Error('Invoice not found');
+    const extractedItems = Array.isArray(body.extracted_items) ? body.extracted_items : invoice.extracted_items || [];
+    const updatedInvoice = updateRecord(db, 'Invoice', invoice.id, {
+      status: 'confirmed',
+      confirmed_at: nowIso(),
+      confirmed_by: user?.email || 'system',
+      extracted_items: extractedItems,
+      invoice_date: body.invoice_date || invoice.invoice_date
+    });
+    const recalculated = rebuildInvoiceLedgerEvents(db, user, updatedInvoice, extractedItems);
+
+    if (updatedInvoice.order_id) {
+      try {
+        const order = getEntityRecord(db, 'Order', updatedInvoice.order_id);
+        if (order && order.type === 'commissary') {
+          updateRecord(db, 'Order', updatedInvoice.order_id, {
+            status: 'received',
+            received_at: nowIso()
+          });
+        }
+      } catch (error) {
+        console.error('Failed to update order status:', error.message);
+      }
+    }
+
+    return {
+      data: {
+        success: true,
+        invoice: updatedInvoice,
+        ledger_events: invoiceLedgerEvents(db, updatedInvoice, extractedItems).length,
+        recalculated
+      }
+    };
+  },
+
+  submitTransfer: async ({ db, user, body }) => {
+    const companyId = body.company_id || body.companyId || companyIdForUser(db, user);
+    const immediate = Boolean(body.immediate);
+    const transfer = createRecord(db, 'Transfer', {
+      company_id: companyId,
+      from_location_id: body.from_location_id,
+      to_location_id: body.to_location_id,
+      items: body.items || [],
+      notes: body.notes || '',
+      status: immediate ? 'received' : 'in_transit',
+      transfer_number: body.transfer_number || `TR-${Date.now().toString().slice(-6)}`,
+      dispatched_at: normalizeEffectiveAt(body.dispatched_at || nowIso()),
+      received_at: immediate ? normalizeEffectiveAt(body.received_at || nowIso()) : null
+    }, user);
+    const recalculated = rebuildTransferLedgerEvents(db, user, transfer);
+    return {
+      data: {
+        success: true,
+        transfer,
+        ledger_events: transferLedgerEvents(db, transfer).length,
+        recalculated
+      }
+    };
+  },
+
+  receiveTransfer: async ({ db, user, body }) => {
+    const transfer = getEntityRecord(db, 'Transfer', body.transferId || body.transfer_id);
+    if (!transfer) throw new Error('Transfer not found');
+    const updatedTransfer = updateRecord(db, 'Transfer', transfer.id, {
+      status: 'received',
+      received_at: normalizeEffectiveAt(body.received_at || nowIso())
+    });
+    const recalculated = rebuildTransferLedgerEvents(db, user, updatedTransfer);
+    return {
+      data: {
+        success: true,
+        transfer: updatedTransfer,
+        ledger_events: transferLedgerEvents(db, updatedTransfer).length,
+        recalculated
+      }
+    };
+  },
+
+  inventoryAsOf: async ({ db, body }) => ({
+    data: {
+      as_of: normalizeEffectiveAt(body.asOf || body.as_of || nowIso()),
+      rows: inventoryRowsAsOf(db, {
+        asOf: body.asOf || body.as_of || nowIso(),
+        locationId: body.location_id || body.locationId
+      })
+    }
+  }),
 
   fulfillCommissaryOrder: async ({ db, user, body }) => {
     const order = getEntityRecord(db, 'Order', body.order_id);
@@ -1249,7 +1847,8 @@ const functionHandlers = {
           location_id: location.id,
           item_id: item.id,
           quantity_on_hand: Number(stock?.on_hand_quantity || 0),
-          unit_cost: Number(item.unit_cost || 0)
+          unit_cost: Number(stock?.average_unit_cost || item.unit_cost || 0),
+          inventory_value: Number(stock?.inventory_value || 0)
         }, user);
         created += 1;
       }
@@ -1467,6 +2066,55 @@ const handleUsers = async (req, res, pathname) => {
   return sendJson(res, 200, result);
 };
 
+const handleLocationInventoryWrite = async (req, res, id) => {
+  if (!['POST', 'PATCH'].includes(req.method)) return false;
+  const body = await readJsonBody(req);
+  const result = await withDb(async (writeDb) => {
+    const writeUser = currentUser(writeDb, req);
+    if (!writeUser) throw new Error('Unauthorized');
+    const existing = id ? getEntityRecord(writeDb, 'LocationInventory', id) : null;
+    if (id && !existing) throw new Error('Location inventory record not found');
+
+    const locationId = body.location_id || existing?.location_id;
+    const itemId = body.item_id || existing?.item_id;
+    if (!locationId || !itemId) throw new Error('location_id and item_id are required');
+
+    const companyId = body.company_id || existing?.company_id || companyIdForUser(writeDb, writeUser);
+    let record = existing || writeDb.entities.LocationInventory.find((row) => row.location_id === locationId && row.item_id === itemId);
+    const settings = {
+      company_id: companyId,
+      location_id: locationId,
+      item_id: itemId,
+      par_level: Number(body.par_level ?? record?.par_level ?? 0),
+      reorder_point: Number(body.reorder_point ?? record?.reorder_point ?? 0),
+      on_hand_quantity: Number(record?.on_hand_quantity || 0),
+      inventory_value: Number(record?.inventory_value || 0),
+      average_unit_cost: Number(record?.average_unit_cost || 0)
+    };
+
+    if (record) {
+      record = updateRecord(writeDb, 'LocationInventory', record.id, settings);
+    } else {
+      record = createRecord(writeDb, 'LocationInventory', settings, writeUser);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'on_hand_quantity')) {
+      record = setManualInventoryQuantity(writeDb, writeUser, {
+        companyId,
+        locationId,
+        itemId,
+        targetQuantity: Number(body.on_hand_quantity || 0),
+        effectiveAt: body.effective_at || nowIso(),
+        notes: body.notes || 'Manual Location Stock edit'
+      });
+    }
+
+    return record;
+  });
+
+  return sendJson(res, 200, result);
+};
+
 const handleEntities = async (req, res, pathname, searchParams) => {
   const match = pathname.match(/^\/api\/entities\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) return false;
@@ -1474,6 +2122,27 @@ const handleEntities = async (req, res, pathname, searchParams) => {
   const db = await loadDb();
   const user = currentUser(db, req);
   if (!user) return sendJson(res, 401, { error: 'Unauthorized' });
+
+  if (req.method === 'DELETE' && id && ['InventoryCount', 'Invoice', 'Transfer'].includes(entityName)) {
+    const result = await withDb(async (writeDb) => {
+      const writeUser = currentUser(writeDb, req);
+      if (!writeUser) throw new Error('Unauthorized');
+      const deleted = deleteRecord(writeDb, entityName, id);
+      if (!deleted) return false;
+      const sourceType = entityName === 'InventoryCount' ? 'inventory_count' : entityName.toLowerCase();
+      writeDb.entities.InventoryLedger = (writeDb.entities.InventoryLedger || []).filter((event) => (
+        event.source_type !== sourceType || event.source_id !== id
+      ));
+      recalculateAllInventory(writeDb, writeUser);
+      return true;
+    });
+    if (!result) return sendJson(res, 404, { error: 'Not found' });
+    return sendJson(res, 200, { success: true });
+  }
+
+  if (entityName === 'LocationInventory' && ['POST', 'PATCH'].includes(req.method)) {
+    return handleLocationInventoryWrite(req, res, id);
+  }
 
   if (req.method === 'GET' && entityName === 'InventoryCount') {
     const result = await withDb(async (writeDb) => {

@@ -233,7 +233,8 @@ export default function LocationStock() {
     r.item.category?.toLowerCase().includes(search.toLowerCase())
   );
 
-  const getItemValue = (item, onHand) => {
+  const getItemValue = (item, onHand, li) => {
+    if (Number.isFinite(Number(li?.inventory_value))) return Number(li.inventory_value);
     const preferred = item.purchase_options?.find(o => o.is_preferred) || item.purchase_options?.[0];
     const packUnits = preferred?.inner_pack_units || item.inner_pack_units || 1;
     const packsPerCase = preferred?.packs_per_case || item.packs_per_case;
@@ -246,7 +247,7 @@ export default function LocationStock() {
     }
     return onHand * unitCost;
   };
-  const locValue = rows.reduce((sum, r) => sum + getItemValue(r.item, r.li.on_hand_quantity || 0), 0);
+  const locValue = rows.reduce((sum, r) => sum + getItemValue(r.item, r.li.on_hand_quantity || 0, r.li), 0);
 
   const isMobile = useIsMobile();
 
@@ -358,7 +359,7 @@ export default function LocationStock() {
                           <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-border text-xs">
                             <div><p className="text-muted-foreground">On Hand</p><p className={`font-semibold mt-0.5 ${isLow ? 'text-red-600' : ''}`}>{onHand} <span className="text-muted-foreground font-normal">{item.unit_of_measure}</span></p></div>
                             <div><p className="text-muted-foreground">Par</p><p className="font-medium mt-0.5">{par || '—'}</p></div>
-                            <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand).toFixed(2)}</p></div>
+                            <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand, li).toFixed(2)}</p></div>
                           </div>
                         </div>
                       );
@@ -387,7 +388,7 @@ export default function LocationStock() {
                     <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-border text-xs">
                       <div><p className="text-muted-foreground">On Hand</p><p className={`font-semibold mt-0.5 ${isLow ? 'text-red-600' : ''}`}>{onHand} <span className="text-muted-foreground font-normal">{item.unit_of_measure}</span></p></div>
                       <div><p className="text-muted-foreground">Par</p><p className="font-medium mt-0.5">{par || '—'}</p></div>
-                      <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand).toFixed(2)}</p></div>
+                      <div><p className="text-muted-foreground">Value</p><p className="font-medium mt-0.5">${getItemValue(item, onHand, li).toFixed(2)}</p></div>
                     </div>
                   </div>
                 );
@@ -427,7 +428,7 @@ export default function LocationStock() {
                               <td className="px-4 py-3"><span className={`font-semibold ${isLow ? 'text-red-600' : 'text-foreground'}`}>{onHand}</span><span className="text-muted-foreground ml-1 text-xs">{item.unit_of_measure}</span></td>
                               <td className="px-4 py-3 text-muted-foreground">{par || '—'}</td>
                               <td className="px-4 py-3 text-muted-foreground">{li?.reorder_point || '—'}</td>
-                              <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li?.unit_cost).toFixed(2)}</td>
+                              <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li).toFixed(2)}</td>
                               <td className="px-4 py-3">{isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}</td>
                               <td className="px-4 py-3"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button></td>
                             </tr>
@@ -449,7 +450,7 @@ export default function LocationStock() {
                         <td className="px-4 py-3"><span className={`font-semibold ${isLow ? 'text-red-600' : 'text-foreground'}`}>{onHand}</span><span className="text-muted-foreground ml-1 text-xs">{item.unit_of_measure}</span></td>
                         <td className="px-4 py-3 text-muted-foreground">{par || '—'}</td>
                         <td className="px-4 py-3 text-muted-foreground">{li?.reorder_point || '—'}</td>
-                        <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li?.unit_cost).toFixed(2)}</td>
+                        <td className="px-4 py-3 font-medium">${getItemValue(item, onHand, li).toFixed(2)}</td>
                         <td className="px-4 py-3">{isLow ? <span className="flex items-center gap-1 text-red-600 text-xs font-medium"><AlertTriangle className="w-3 h-3" />Low</span> : <span className="flex items-center gap-1 text-green-600 text-xs font-medium"><CheckCircle className="w-3 h-3" />OK</span>}</td>
                         <td className="px-4 py-3"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit({ item, li: rowLi, liId: li?.id })}><Pencil className="w-3.5 h-3.5" /></Button></td>
                       </tr>
