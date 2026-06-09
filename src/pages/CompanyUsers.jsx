@@ -73,9 +73,18 @@ export default function CompanyUsers() {
   };
 
   const toggleLocation = (locId, permObj, setPermObj) => {
-    const ids = permObj.location_ids || [];
+    const ids = permObj.permissions?.location_ids || [];
     const updated = ids.includes(locId) ? ids.filter(id => id !== locId) : [...ids, locId];
-    setPermObj(f => ({ ...f, permissions: { ...f.permissions, location_ids: updated } }));
+    // If removing from location_ids, also remove from commissary_manage_ids
+    const manageIds = permObj.permissions?.commissary_manage_ids || [];
+    const updatedManage = updated.includes(locId) ? manageIds : manageIds.filter(id => id !== locId);
+    setPermObj(f => ({ ...f, permissions: { ...f.permissions, location_ids: updated, commissary_manage_ids: updatedManage } }));
+  };
+
+  const toggleCommissaryManage = (locId, permObj, setPermObj) => {
+    const manageIds = permObj.permissions?.commissary_manage_ids || [];
+    const updated = manageIds.includes(locId) ? manageIds.filter(id => id !== locId) : [...manageIds, locId];
+    setPermObj(f => ({ ...f, permissions: { ...f.permissions, commissary_manage_ids: updated } }));
   };
 
   const sendInvite = async () => {
@@ -201,8 +210,8 @@ export default function CompanyUsers() {
         {!permObj.permissions?.all_locations && (
           <div>
             <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Location Access</p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {locations.map(loc => (
+            <div className="space-y-1">
+              {locations.filter(l => l.type !== 'commissary').map(loc => (
                 <label key={loc.id} className="flex items-center gap-2 cursor-pointer p-1.5 rounded hover:bg-muted/50">
                   <Checkbox
                     checked={(permObj.permissions?.location_ids || []).includes(loc.id)}
@@ -212,6 +221,60 @@ export default function CompanyUsers() {
                 </label>
               ))}
             </div>
+
+            {locations.filter(l => l.type === 'commissary').length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Commissary Access</p>
+                <div className="space-y-2">
+                  {locations.filter(l => l.type === 'commissary').map(loc => {
+                    const hasAccess = (permObj.permissions?.location_ids || []).includes(loc.id);
+                    const canManage = (permObj.permissions?.commissary_manage_ids || []).includes(loc.id);
+                    return (
+                      <div key={loc.id} className={`p-2 rounded-lg border ${hasAccess ? 'border-purple-200 bg-purple-50/50' : 'border-border'}`}>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <Checkbox
+                            checked={hasAccess}
+                            onCheckedChange={() => toggleLocation(loc.id, permObj, setPermObj)}
+                          />
+                          <span className="text-xs font-medium">{loc.name}</span>
+                          <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full">Commissary</span>
+                        </label>
+                        {hasAccess && (
+                          <div className="mt-2 ml-6 space-y-1">
+                            <p className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">Access Level</p>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="radio"
+                                name={`commissary_access_${loc.id}_${permObj.email || 'new'}`}
+                                checked={!canManage}
+                                onChange={() => toggleCommissaryManage(loc.id, { ...permObj, permissions: { ...permObj.permissions, commissary_manage_ids: (permObj.permissions?.commissary_manage_ids || []).filter(id => id !== loc.id) } }, setPermObj)}
+                                className="w-3 h-3 text-primary"
+                              />
+                              <span className="text-xs">View only — can see orders, no fulfillment</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="radio"
+                                name={`commissary_access_${loc.id}_${permObj.email || 'new'}`}
+                                checked={canManage}
+                                onChange={() => {
+                                  const manageIds = permObj.permissions?.commissary_manage_ids || [];
+                                  if (!manageIds.includes(loc.id)) {
+                                    setPermObj(f => ({ ...f, permissions: { ...f.permissions, commissary_manage_ids: [...manageIds, loc.id] } }));
+                                  }
+                                }}
+                                className="w-3 h-3 text-primary"
+                              />
+                              <span className="text-xs font-medium">Manage & fulfill orders</span>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -273,7 +336,14 @@ export default function CompanyUsers() {
                         {entry.perm.permissions?.all_locations && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-medium">All Locations</span>}
                         {!entry.perm.permissions?.all_locations && (entry.perm.permissions?.location_ids || []).map(lid => {
                           const loc = locations.find(l => l.id === lid);
-                          return loc ? <span key={lid} className="px-1.5 py-0.5 bg-muted text-muted-foreground rounded text-[10px] font-medium">{loc.name}</span> : null;
+                          if (!loc) return null;
+                          const isCommissary = loc.type === 'commissary';
+                          const canManage = (entry.perm.permissions?.commissary_manage_ids || []).includes(lid);
+                          return (
+                            <span key={lid} className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${isCommissary ? (canManage ? 'bg-purple-100 text-purple-700' : 'bg-purple-50 text-purple-500') : 'bg-muted text-muted-foreground'}`}>
+                              {loc.name}{isCommissary ? (canManage ? ' ✦' : ' (view)') : ''}
+                            </span>
+                          );
                         })}
                       </div>
                     ) : (

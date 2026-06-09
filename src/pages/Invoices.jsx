@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Camera, Upload, CheckCircle, XCircle, Eye, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,9 +13,9 @@ import { format } from 'date-fns';
 
 export default function Invoices() {
   const { canAccessLocation } = useAuth();
+  const isMobile = useIsMobile();
   const [locations, setLocations] = useState([]);
   const [items, setItems] = useState([]);
-  const [locInv, setLocInv] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [uploadDialog, setUploadDialog] = useState(false);
   const [reviewDialog, setReviewDialog] = useState(null);
@@ -28,12 +29,10 @@ export default function Invoices() {
   const load = () => Promise.all([
     base44.entities.Location.list(),
     base44.entities.InventoryItem.filter({ is_active: true }),
-    base44.entities.LocationInventory.list(),
     base44.entities.Invoice.list('-created_date', 50),
-  ]).then(([locs, itms, linv, invs]) => {
+  ]).then(([locs, itms, invs]) => {
     setLocations(locs.filter(l => canAccessLocation(l.id)));
     setItems(itms);
-    setLocInv(linv);
     setInvoices(invs);
     setLoading(false);
   });
@@ -107,35 +106,17 @@ export default function Invoices() {
 
   const confirmInvoice = async () => {
     setConfirming(true);
-    await base44.entities.Invoice.update(reviewDialog.id, {
-      status: 'confirmed',
-      extracted_items: reviewDialog.extracted_items,
-    });
-    // Update stock levels for matched items
-    for (const row of reviewDialog.extracted_items) {
-      if (!row.item_id) continue;
-      const li = locInv.find(l => l.location_id === reviewDialog.location_id && l.item_id === row.item_id);
-      const newQty = (li?.on_hand_quantity || 0) + (row.quantity || 0);
-      if (li) await base44.entities.LocationInventory.update(li.id, { ...li, on_hand_quantity: newQty });
-      else await base44.entities.LocationInventory.create({ location_id: reviewDialog.location_id, item_id: row.item_id, on_hand_quantity: newQty, par_level: 0, reorder_point: 0 });
+    try {
+      await base44.functions.invoke('confirmInvoice', {
+        invoiceId: reviewDialog.id,
+        extracted_items: reviewDialog.extracted_items,
+        invoice_date: reviewDialog.invoice_date,
+      });
+      await load();
+      setReviewDialog(null);
+    } finally {
+      setConfirming(false);
     }
-    // Update related commissary order status to 'received'
-    if (reviewDialog.order_id) {
-      try {
-        const order = await base44.entities.Order.get(reviewDialog.order_id);
-        if (order && order.type === 'commissary') {
-          await base44.entities.Order.update(reviewDialog.order_id, {
-            status: 'received',
-            received_at: new Date().toISOString()
-          });
-        }
-      } catch (err) {
-        console.error('Failed to update order status:', err);
-      }
-    }
-    await load();
-    setReviewDialog(null);
-    setConfirming(false);
   };
 
   const rejectInvoice = async () => {
@@ -148,7 +129,7 @@ export default function Invoices() {
   const pendingCount = invoices.filter(i => i.status === 'pending_review').length;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Invoices"
         subtitle="Scan invoices with your camera to auto-receive stock"
@@ -162,10 +143,36 @@ export default function Invoices() {
         </div>
       )}
 
-      <div className="bg-card border border-border rounded-xl overflow-hidden">
-        {loading ? (
-          <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
-        ) : (
+      {loading ? (
+        <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
+      ) : isMobile ? (
+        <div className="space-y-3">
+          {invoices.length === 0 ? (
+            <div className="bg-card border border-border rounded-xl p-8 text-center text-muted-foreground">No invoices yet. Scan your first invoice to get started.</div>
+          ) : invoices.map(inv => (
+            <div key={inv.id} className={`bg-card border rounded-xl p-4 space-y-3 ${inv.status === 'pending_review' ? 'border-amber-300 bg-amber-50/30' : 'border-border'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-sm">{inv.vendor_name || '—'}</p>
+                  <p className="text-xs text-muted-foreground">{locName(inv.location_id)} · {format(new Date(inv.created_date), 'MMM d, yyyy')}</p>
+                </div>
+                <StatusBadge status={inv.status} />
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div><span className="text-muted-foreground block">Invoice #</span><span className="font-mono font-medium">{inv.invoice_number || '—'}</span></div>
+                <div><span className="text-muted-foreground block">Total</span><span className="font-semibold text-green-700">${(inv.total_amount || 0).toFixed(2)}</span></div>
+                <div><span className="text-muted-foreground block">Items</span><span className="font-medium">{inv.extracted_items?.length || 0}</span></div>
+              </div>
+              {inv.status === 'pending_review' && (
+                <Button size="sm" className="w-full h-9" onClick={() => setReviewDialog(inv)}>
+                  <Eye className="w-4 h-4 mr-1" />Review Invoice
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr>
@@ -197,8 +204,8 @@ export default function Invoices() {
               ))}
             </tbody>
           </table>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Upload Dialog */}
       <Dialog open={uploadDialog} onOpenChange={setUploadDialog}>

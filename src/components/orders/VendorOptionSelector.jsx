@@ -11,35 +11,15 @@ export default function VendorOptionSelector({ item, currentVendorId, onSelectVe
   const location = locations.find(l => l.id === selectedLocation);
   
   // Get all unique vendor options for this item
-  const allOptions = [];
+  let allOptions = [];
   
-  // Add primary vendor if exists
-  if (item.vendor_id && purchaseOptions.length > 0 && !purchaseOptions.find(p => p.vendor_id === item.vendor_id)) {
-    allOptions.push({
-      vendor_id: item.vendor_id,
-      vendor_name: item.vendor_name || 'Primary Vendor',
-      unit_cost: item.unit_cost || 0,
-      product_name: item.name,
-      product_code: item.sku || '',
-      pack_size: '',
-      unit_of_measure: item.unit_of_measure,
-      is_preferred: item.is_preferred || false,
-    });
-  }
-  
-  // Add purchase options
-  purchaseOptions.forEach(opt => {
-    // Filter by location if location_ids is specified
-    if (opt.location_ids && !opt.location_ids.includes(selectedLocation)) {
-      return;
-    }
-    allOptions.push(opt);
-  });
-  
-  // For commissary items, add commissary option
+  // CRITICAL: For commissary items ordered by retail locations, ONLY show commissary vendor
   if (item.is_commissary_item && item.commissary_vendor_id && location?.type !== 'commissary') {
-    const commissaryOption = allOptions.find(o => o.vendor_id === item.commissary_vendor_id);
-    if (!commissaryOption) {
+    // Retail location ordering commissary item - only show commissary option
+    const commissaryOption = purchaseOptions.find(o => o.vendor_id === item.commissary_vendor_id);
+    if (commissaryOption) {
+      allOptions.push(commissaryOption);
+    } else {
       allOptions.push({
         vendor_id: item.commissary_vendor_id,
         vendor_name: 'Commissary',
@@ -51,6 +31,30 @@ export default function VendorOptionSelector({ item, currentVendorId, onSelectVe
         is_preferred: false,
       });
     }
+  } else {
+    // Not a commissary item, or commissary location ordering - show all options
+    // Add primary vendor if exists
+    if (item.vendor_id && purchaseOptions.length > 0 && !purchaseOptions.find(p => p.vendor_id === item.vendor_id)) {
+      allOptions.push({
+        vendor_id: item.vendor_id,
+        vendor_name: item.vendor_name || 'Primary Vendor',
+        unit_cost: item.unit_cost || 0,
+        product_name: item.name,
+        product_code: item.sku || '',
+        pack_size: '',
+        unit_of_measure: item.unit_of_measure,
+        is_preferred: item.is_preferred || false,
+      });
+    }
+    
+    // Add purchase options
+    purchaseOptions.forEach(opt => {
+      // Filter by location if location_ids is specified
+      if (opt.location_ids && !opt.location_ids.includes(selectedLocation)) {
+        return;
+      }
+      allOptions.push(opt);
+    });
   }
   
   if (allOptions.length <= 1) {

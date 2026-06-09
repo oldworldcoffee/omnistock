@@ -40,7 +40,9 @@ Deno.serve(async (req) => {
         quantity_fulfilled: item.quantity_fulfilled,
         unit_cost: item.unit_cost,
         total_cost: total,
-        notes: item.notes || ''
+        notes: item.notes || '',
+        ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+        ...(item.variant_quantities ? { variant_quantities: item.variant_quantities } : {})
       };
     });
 
@@ -50,8 +52,12 @@ Deno.serve(async (req) => {
     const hasRemaining = items.some(item => (item.quantity_fulfilled || 0) < (item.quantity_ordered || 0));
     const status = allFulfilled ? 'fulfilled' : someFulfilled ? 'partial' : 'pending';
 
+    // Get company_id from order
+    const company_id = order.company_id;
+
     // Create fulfillment record
     const fulfillment = await base44.entities.CommissaryFulfillment.create({
+      company_id,
       order_id,
       order_number: order.order_number,
       retail_location_id: order.location_id,
@@ -61,6 +67,19 @@ Deno.serve(async (req) => {
       fulfillment_date: new Date().toISOString(),
       notes: notes || ''
     });
+
+    // Deplete commissary inventory for each fulfilled item
+    for (const item of items.filter(i => (i.quantity_fulfilled || 0) > 0)) {
+      const invRecords = await base44.entities.LocationInventory.filter({
+        location_id: commissary_location_id,
+        item_id: item.item_id,
+      });
+      if (invRecords.length > 0) {
+        const inv = invRecords[0];
+        const newQty = Math.max(0, (inv.on_hand_quantity || 0) - (item.quantity_fulfilled || 0));
+        await base44.entities.LocationInventory.update(inv.id, { on_hand_quantity: newQty });
+      }
+    }
 
     // Handle split invoice if requested and there are remaining items
     if (split_option === 'split' && hasRemaining) {
@@ -72,7 +91,9 @@ Deno.serve(async (req) => {
         quantity_ordered: item.quantity_fulfilled,
         quantity_received: item.quantity_fulfilled,
         unit_cost: item.unit_cost,
-        total_cost: item.quantity_fulfilled * item.unit_cost
+        total_cost: item.quantity_fulfilled * item.unit_cost,
+        ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+        ...(item.variant_quantities ? { variant_quantities: item.variant_quantities } : {})
       }));
 
       await base44.entities.Order.update(order_id, {
@@ -93,10 +114,13 @@ Deno.serve(async (req) => {
           quantity_ordered: (item.quantity_ordered || 0) - (item.quantity_fulfilled || 0),
           quantity_received: 0,
           unit_cost: item.unit_cost,
-          total_cost: ((item.quantity_ordered || 0) - (item.quantity_fulfilled || 0)) * item.unit_cost
+          total_cost: ((item.quantity_ordered || 0) - (item.quantity_fulfilled || 0)) * item.unit_cost,
+          ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+          ...(item.variant_quantities ? { variant_quantities: item.variant_quantities } : {})
         }));
 
       const splitOrder = await base44.entities.Order.create({
+        company_id,
         type: 'commissary',
         status: 'sent',
         location_id: order.location_id,
@@ -140,6 +164,7 @@ Deno.serve(async (req) => {
 
       // Create invoice for the fulfilled items only (linked to original order)
       const invoice = await base44.entities.Invoice.create({
+        company_id,
         location_id: order.location_id,
         vendor_id: commissary_location_id,
         vendor_name: commissary.name,
@@ -152,7 +177,9 @@ Deno.serve(async (req) => {
           quantity: item.quantity_fulfilled,
           unit_cost: item.unit_cost,
           total_cost: item.total_cost,
-          matched: true
+          matched: true,
+          ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+          ...(item.variant_quantities ? { variant_quantities: item.variant_quantities } : {})
         })),
         total_amount,
         order_id: order_id,
@@ -178,6 +205,7 @@ Deno.serve(async (req) => {
 
     // Create invoice for the retail location
     const invoice = await base44.entities.Invoice.create({
+      company_id,
       location_id: order.location_id,
       vendor_id: commissary_location_id,
       vendor_name: commissary.name,
@@ -190,7 +218,9 @@ Deno.serve(async (req) => {
         quantity: item.quantity_fulfilled,
         unit_cost: item.unit_cost,
         total_cost: item.total_cost,
-        matched: true
+        matched: true,
+        ...(item.variant_id ? { variant_id: item.variant_id } : {}),
+        ...(item.variant_quantities ? { variant_quantities: item.variant_quantities } : {})
       })),
       total_amount,
       order_id,

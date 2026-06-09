@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
-import { Plus, ShoppingCart, Send, Eye, Trash2, Search, PackageOpen, RefreshCw, Minus, ChevronRight, Sparkles, TrendingUp, Globe, ShoppingBasket } from 'lucide-react';
+import { useIsMobile } from '@/hooks/useIsMobile';
+import { Plus, ShoppingCart, Send, Eye, Trash2, Search, PackageOpen, RefreshCw, Minus, ChevronRight, Sparkles, TrendingUp } from 'lucide-react';
 import { toast } from 'sonner';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
@@ -16,18 +17,18 @@ import MultiVendorCart from '@/components/orders/MultiVendorCart';
 import OrderHistory from '@/components/orders/OrderHistory';
 import SmartFillDialog from '@/components/orders/SmartFillDialog';
 import AIReviewDialog from '@/components/orders/AIReviewDialog';
-import OnlineShoppingList from '@/components/orders/OnlineShoppingList';
-import InStoreShoppingList from '@/components/orders/InStoreShoppingList';
+
 
 export default function VendorOrders() {
   const { canAccessLocation, user, companyId } = useAuth();
+  const isMobile = useIsMobile();
   const [locations, setLocations] = useState([]);
   const [vendors, setVendors] = useState([]);
   const [items, setItems] = useState([]);
   const [locInv, setLocInv] = useState([]);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState('history'); // 'history' | 'cart' | 'online'
+  const [view, setView] = useState('history'); // 'history' | 'cart'
   const [selectedLocation, setSelectedLocation] = useState('');
   const [selectedVendor, setSelectedVendor] = useState('');
   const [carts, setCarts] = useState({}); // {vendorId: [{item, qty, unit_cost, ...}]}
@@ -174,35 +175,57 @@ export default function VendorOrders() {
     setCarts(Object.fromEntries(Object.entries(newCarts).filter(([_, cart]) => cart.filter(c => c.qty > 0).length > 0)));
   };
 
-  const addToCart = (item, vendorId) => {
-    const targetVendor = vendorId || getVendorForItem(item);
+  const addToCart = (item, vendorId, qty = 1) => {
+    // Determine target vendor based on context
+    const location = locations.find(l => l.id === selectedLocation);
+    const isCommissaryLocation = location?.type === 'commissary';
+    
+    let targetVendor;
+    if (isCommissaryLocation) {
+      targetVendor = vendorId || (item.purchase_options || []).find(p => p.is_preferred)?.vendor_id || item.vendor_id;
+    } else {
+      targetVendor = (item.is_commissary_item && item.commissary_vendor_id) 
+        ? item.commissary_vendor_id 
+        : (vendorId || getVendorForItem(item));
+    }
     if (!targetVendor) return;
     
-    const newCarts = { ...carts };
-    if (!newCarts[targetVendor]) newCarts[targetVendor] = [];
-    
-    const existing = newCarts[targetVendor].findIndex(c => c.item_id === item.id);
-    const unitCost = getUnitCostForItem(item, targetVendor);
-    const li = getLocInv(item.id);
-    
-    if (existing >= 0) {
-      const newQty = newCarts[targetVendor][existing].qty + 1;
-      newCarts[targetVendor][existing] = { ...newCarts[targetVendor][existing], qty: newQty, total_cost: newQty * unitCost };
-    } else {
-      newCarts[targetVendor].push({
-        item_id: item.id,
-        item_name: item.name,
-        category: item.category,
-        unit_of_measure: item.unit_of_measure,
-        unit_cost: unitCost,
-        qty: 1,
-        total_cost: unitCost,
-        on_hand: li?.on_hand_quantity || 0,
-        par_level: li?.par_level || 0,
-        purchase_options: item.purchase_options || [],
-      });
-    }
-    setCarts(newCarts);
+    // Use functional update to handle rapid successive calls
+    setCarts(prevCarts => {
+      const newCarts = { ...prevCarts };
+      if (!newCarts[targetVendor]) newCarts[targetVendor] = [];
+      
+      const existing = newCarts[targetVendor].findIndex(c => c.item_id === item.id);
+      const li = locInv.find(l => l.location_id === selectedLocation && l.item_id === item.id);
+      const unitCost = getUnitCostForItem(item, targetVendor);
+      
+      if (existing >= 0) {
+        newCarts[targetVendor][existing] = {
+          ...newCarts[targetVendor][existing],
+          qty: (newCarts[targetVendor][existing].qty || 0) + qty,
+          total_cost: ((newCarts[targetVendor][existing].qty || 0) + qty) * unitCost,
+        };
+      } else {
+        newCarts[targetVendor].push({
+          item_id: item.id,
+          item_name: item.name,
+          category: item.category,
+          unit_of_measure: item.unit_of_measure,
+          unit_cost: unitCost,
+          qty: qty,
+          total_cost: qty * unitCost,
+          on_hand: li?.on_hand_quantity || 0,
+          par_level: li?.par_level || 0,
+          purchase_options: item.purchase_options || [],
+        });
+      }
+      return newCarts;
+    });
+  };
+
+  const addVariantToCart = (variantItem, vendorId, qty = 1) => {
+    // Same as addToCart but for variant items
+    addToCart(variantItem, vendorId, qty);
   };
 
   const updateCartQty = (vendorId, idx, val) => {
@@ -244,6 +267,8 @@ export default function VendorOrders() {
         total_cost: i.total_cost,
         on_hand: 0,
         par_level: 0,
+        variant_id: i.variant_id || null,
+        variant_quantities: i.variant_quantities || null,
       }))
     });
     setSelectedLocation(order.location_id);
@@ -254,14 +279,17 @@ export default function VendorOrders() {
   const updateDraftOrder = async () => {
     const vendorId = editDialog.vendor_id;
     const vendorCart = carts[vendorId] || [];
-    const orderItems = vendorCart.filter(i => i.qty > 0).map(i => ({
-      item_id: i.item_id,
-      item_name: i.item_name,
-      unit_of_measure: i.unit_of_measure,
-      quantity_ordered: i.qty,
-      unit_cost: i.unit_cost,
-      total_cost: i.total_cost,
-    }));
+    const orderItems = vendorCart.filter(i => i.qty > 0).map(i => {
+      const baseItem = {
+        item_id: i.item_id,
+        item_name: i.item_name,
+        unit_of_measure: i.unit_of_measure,
+        quantity_ordered: i.qty,
+        unit_cost: i.unit_cost,
+        total_cost: i.total_cost,
+      };
+      return baseItem;
+    });
     const totalAmount = vendorCart.reduce((s, i) => s + i.total_cost, 0);
     await base44.entities.Order.update(editDialog.id, {
       items: orderItems,
@@ -286,14 +314,17 @@ export default function VendorOrders() {
 
   const createOrder = async (vendorId) => {
     const vendorCart = carts[vendorId] || [];
-    const orderItems = vendorCart.filter(i => i.qty > 0).map(i => ({
-      item_id: i.item_id,
-      item_name: i.item_name,
-      unit_of_measure: i.unit_of_measure,
-      quantity_ordered: i.qty,
-      unit_cost: i.unit_cost,
-      total_cost: i.total_cost,
-    }));
+    const orderItems = vendorCart.filter(i => i.qty > 0).map(i => {
+      const baseItem = {
+        item_id: i.item_id,
+        item_name: i.item_name,
+        unit_of_measure: i.unit_of_measure,
+        quantity_ordered: i.qty,
+        unit_cost: i.unit_cost,
+        total_cost: i.total_cost,
+      };
+      return baseItem;
+    });
     
     // Determine order type based on vendor
     const vendor = vendors.find(v => v.id === vendorId);
@@ -382,10 +413,12 @@ export default function VendorOrders() {
     
     const vendorCart = carts[pendingVendorId] || [];
     const totalAmount = vendorCart.reduce((s, i) => s + i.total_cost, 0);
+    const vendor = vendors.find(v => v.id === pendingVendorId);
+    const isNonEmailVendor = pendingOrderType === 'commissary' || vendor?.order_type === 'online' || vendor?.order_type === 'instore';
     const order = await base44.entities.Order.create({
       company_id: companyId,
       type: pendingOrderType,
-      status: pendingOrderType === 'commissary' ? 'sent' : 'draft',
+      status: isNonEmailVendor ? 'sent' : 'draft',
       location_id: selectedLocation,
       vendor_id: pendingVendorId,
       items: pendingOrderItems,
@@ -405,7 +438,7 @@ export default function VendorOrders() {
         order_id: order.id,
         order_number: order.order_number,
         retail_location_id: selectedLocation,
-        commissary_location_id: vendor.id,
+        commissary_location_id: vendor.commissioned_location_id || vendor.id,
         items: pendingOrderItems.map(i => ({
           item_id: i.item_id,
           item_name: i.item_name,
@@ -421,14 +454,21 @@ export default function VendorOrders() {
       toast.success('Commissary order placed! View it in the Commissary dashboard.');
       setView('history');
     } else {
-      // For regular vendor orders, show email dialog
       const vendor = vendors.find(v => v.id === pendingVendorId);
-      const loc = locations.find(l => l.id === selectedLocation);
-      const autoDeliveryDate = calcNextDeliveryDate(vendor, selectedLocation);
-      setEmailDeliveryDate(autoDeliveryDate);
-      setEmailBody('');
-      setEmailDialog({ order, vendor, loc, items: pendingOrderItems, totalAmount });
-      setView('history');
+      if (vendor?.order_type === 'online' || vendor?.order_type === 'instore') {
+        // Online/instore: order is already created as 'sent', user handles it in their respective pages
+        const dest = vendor.order_type === 'online' ? 'Online Orders' : 'In-Store Shopping';
+        toast.success(`Order created! View it in ${dest}.`);
+        setView('history');
+      } else {
+        // Email vendors: show email dialog
+        const loc = locations.find(l => l.id === selectedLocation);
+        const autoDeliveryDate = calcNextDeliveryDate(vendor, selectedLocation);
+        setEmailDeliveryDate(autoDeliveryDate);
+        setEmailBody('');
+        setEmailDialog({ order, vendor, loc, items: pendingOrderItems, totalAmount });
+        setView('history');
+      }
     }
     
     // Clear pending state and close AI review dialog
@@ -448,20 +488,9 @@ export default function VendorOrders() {
   const buildEmailHtml = (type = 'new') => {
     const { order, vendor, loc, items: orderItems, totalAmount } = emailDialog;
     const sentAt = format(new Date(), 'MM/dd/yyyy, hh:mm aa');
-    const deliveryLine = emailDeliveryDate
-      ? `<p>Delivery date: <strong>${format(new Date(emailDeliveryDate + 'T12:00:00'), 'MM/dd/yyyy')}</strong></p>`
-      : '';
-    const notesPart = emailBody.trim() ? `<p><strong>Order comments:</strong> ${emailBody}</p>` : `<p><strong>Order comments:</strong> None</p>`;
-    const rows = orderItems.map(i => `
-      <tr>
-        <td style="border:1px solid #ccc;padding:6px 10px;"></td>
-        <td style="border:1px solid #ccc;padding:6px 10px;">${i.item_name}</td>
-        <td style="border:1px solid #ccc;padding:6px 10px;text-align:center;">${i.quantity_ordered}</td>
-        <td style="border:1px solid #ccc;padding:6px 10px;">${i.quantity_ordered} Total (${i.unit_of_measure})</td>
-        <td style="border:1px solid #ccc;padding:6px 10px;">$${(i.unit_cost || 0).toFixed(2)}</td>
-        <td style="border:1px solid #ccc;padding:6px 10px;">$${(i.total_cost || 0).toFixed(2)}</td>
-        <td style="border:1px solid #ccc;padding:6px 10px;"></td>
-      </tr>`).join('');
+    const deliveryDate = emailDeliveryDate 
+      ? format(new Date(emailDeliveryDate + 'T12:00:00'), 'MM/dd/yyyy')
+      : 'TBD';
 
     if (type === 'cancellation') {
       return `
@@ -471,27 +500,6 @@ export default function VendorOrders() {
 <p><strong>Order cancelled on:</strong> ${sentAt}</p>
 <p><strong>Cancelled by:</strong> ${user?.full_name || '—'}</p>
 <br/>
-<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;">
-  <thead>
-    <tr style="background:#f5f5f5;">
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Product Name</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:center;">Qty</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Total Qty</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Price</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Total</th>
-    </tr>
-  </thead>
-  <tbody>${rows}</tbody>
-  <tfoot>
-    <tr style="background:#f5f5f5;">
-      <td colspan="4" style="border:1px solid #ccc;padding:6px 10px;text-align:right;font-weight:bold;">Sub Total:</td>
-      <td style="border:1px solid #ccc;padding:6px 10px;font-weight:bold;">$${(totalAmount || 0).toFixed(2)}</td>
-    </tr>
-  </tfoot>
-</table>
-<br/>
-${notesPart}
-<br/>
 <p>Customer details:<br/>
 Phone: ${loc?.phone || '—'}<br/>
 Address: ${loc?.address || '—'}</p>
@@ -499,69 +507,71 @@ Address: ${loc?.address || '—'}</p>
     }
 
     return `
-<p>New <strong>Order</strong> from <strong>${loc?.business_name ? loc.business_name + ' - ' : ''}${loc?.name || '—'}</strong> to <strong>${vendor?.name}</strong>.</p>
-${deliveryLine}
-<p><strong>Order number:</strong> ${order.order_number}</p>
-<p><strong>Order placed on:</strong> ${sentAt}</p>
-<p><strong>Order placed by:</strong> ${user?.full_name || '—'} from <strong>${loc?.business_name ? loc.business_name + ' - ' : ''}${loc?.name || '—'}</strong></p>
-<br/>
-<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;">
-  <thead>
-    <tr style="background:#f5f5f5;">
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Product Code</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Product Name</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:center;">Qty</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Total Qty</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Price</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Total</th>
-      <th style="border:1px solid #ccc;padding:6px 10px;text-align:left;">Comments</th>
-    </tr>
-  </thead>
-  <tbody>${rows}</tbody>
-</table>
-<br/>
-<p>Sub Total: <strong>$${(totalAmount || 0).toFixed(2)}</strong></p>
-<br/>
-${notesPart}
-<br/>
-<p>Customer details:<br/>
-Phone: ${loc?.phone || '—'}<br/>
-Address: ${loc?.address || '—'}</p>
-<br/>
-<p style="font-size:12px;color:#888;margin-top:16px;">
-  <a href="TRACKING_PLACEHOLDER_CONFIRM" style="color:#2563eb;">✓ Click here to confirm order received</a>
-</p>
-<img src="TRACKING_PLACEHOLDER_PIXEL" width="1" height="1" style="display:none;" alt="" />
+<div style="max-width:600px;margin:0 auto;font-family:Arial,sans-serif;color:#333;">
+  <h1 style="color:#16a34a;text-align:center;margin:20px 0 10px;font-size:28px;">New Order</h1>
+  <p style="text-align:center;color:#666;margin:0 0 20px;font-size:14px;">From: <strong>${loc?.business_name ? loc.business_name + ' - ' : ''}${loc?.name || '—'}</strong> • ${sentAt} • Order No. <strong>${order.order_number}</strong></p>
+  
+  <div style="text-align:center;margin:25px 0;">
+    <a href="TRACKING_PLACEHOLDER_CONFIRM" style="display:inline-block;padding:14px 40px;background-color:#16a34a;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold;font-size:16px;">View Order Details</a>
+    <p style="color:#999;font-size:12px;margin-top:10px;">Click above to view the full order details online</p>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:30px;margin:30px 0;border-bottom:3px solid #16a34a;padding-bottom:30px;">
+    <div>
+      <p style="color:#999;font-size:12px;text-transform:uppercase;margin-bottom:5px;">Location</p>
+      <h2 style="margin:0 0 15px;font-size:18px;">${loc?.business_name ? loc.business_name + ' - ' : ''}${loc?.name || '—'}</h2>
+    </div>
+    <div>
+      <p style="color:#999;font-size:12px;text-transform:uppercase;margin-bottom:5px;">Delivery Date</p>
+      <h2 style="margin:0;font-size:18px;color:#16a34a;">${deliveryDate}</h2>
+    </div>
+  </div>
+
+  <div style="background:#f9fafb;padding:20px;border-radius:6px;margin:30px 0;">
+    <h3 style="margin:0 0 15px;text-transform:uppercase;color:#666;font-size:12px;">Customer Details</h3>
+    <p style="margin:8px 0;"><strong>Ordered by:</strong> ${user?.full_name || '—'}</p>
+    <p style="margin:8px 0;"><strong>Phone:</strong> ${loc?.phone || '—'}</p>
+    <p style="margin:8px 0;"><strong>Address:</strong> ${loc?.address || '—'}</p>
+  </div>
+</div>
     `.trim();
   };
 
   const sendEmail = async () => {
+    if (sending) return; // Prevent double-click
     setSending(true);
     const htmlBody = buildEmailHtml();
     const vendor = emailDialog.vendor;
 
-    // Fetch company logo
-    const settings = await base44.entities.CompanySettings.list();
-    const logoUrl = settings.length > 0 ? settings[0].logo_url : null;
+    try {
+      // Fetch company logo
+      const settings = await base44.entities.CompanySettings.list();
+      const logoUrl = settings.length > 0 ? settings[0].logo_url : null;
 
-    // Resolve to/cc emails: use location-specific settings if available, else vendor defaults
-    const locSettings = (vendor.location_settings || []).find(s => s.location_id === emailDialog.loc?.id);
-    const toEmail = locSettings?.order_email || vendor.default_order_email || vendor.email;
-    const ccEmail = locSettings?.cc_email || vendor.default_cc_email || '';
+      // Resolve to/cc emails: use location-specific settings if available, else vendor defaults
+      const locSettings = (vendor.location_settings || []).find(s => s.location_id === emailDialog.loc?.id);
+      const toEmail = locSettings?.order_email || vendor.default_order_email || vendor.email;
+      const ccEmail = locSettings?.cc_email || vendor.default_cc_email || '';
 
-    await base44.functions.invoke('sendVendorOrderEmail', {
-      orderId: emailDialog.order.id,
-      toEmail,
-      ccEmail: ccEmail || undefined,
-      subject: `Purchase Order — ${emailDialog.order.order_number}`,
-      htmlBody,
-      logoUrl,
-    });
+      await base44.functions.invoke('sendVendorOrderEmail', {
+        orderId: emailDialog.order.id,
+        toEmail,
+        ccEmail: ccEmail || undefined,
+        subject: `Purchase Order — ${emailDialog.order.order_number}`,
+        htmlBody,
+        logoUrl,
+        appUrl: window.location.origin,
+      });
 
-    await load();
-    setEmailDialog(null);
-    setSending(false);
-    toast.success('Order email sent!');
+      await load();
+      setEmailDialog(null);
+      toast.success('Order email sent!');
+    } catch (error) {
+      console.error('Failed to send email:', error);
+      toast.error('Failed to send email. Please try again.');
+    } finally {
+      setSending(false);
+    }
   };
 
   const deleteOrder = async (sendCancellation = false) => {
@@ -631,6 +641,7 @@ Address: ${loc?.address || '—'}</p>
         subject: `CANCELLED: Order ${deleteDialog.order_number}`,
         htmlBody,
         logoUrl,
+        appUrl: window.location.origin,
       });
     }
     
@@ -657,7 +668,7 @@ Address: ${loc?.address || '—'}</p>
   );
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
       <PageHeader
         title="Vendor Orders"
         subtitle="Browse items and place purchase orders"
@@ -666,27 +677,11 @@ Address: ${loc?.address || '—'}</p>
             <Button variant={view === 'history' ? 'secondary' : 'outline'} onClick={() => setView('history')}>
               <Eye className="w-4 h-4 mr-1" />Order History
             </Button>
-            {vendors.some(v => !v.order_type || v.order_type === 'email') && (
-              <Button variant={view === 'cart' ? 'default' : 'outline'} onClick={() => setView('cart')}>
-                <ShoppingCart className="w-4 h-4 mr-1" />
-                Vendor Order
-                {(() => { const count = Object.entries(carts).filter(([vid]) => { const v = vendors.find(v => v.id === vid); return !v?.order_type || v.order_type === 'email'; }).reduce((sum, [, cart]) => sum + cart.length, 0); return count > 0 ? <span className="ml-1 bg-white text-primary rounded-full text-xs w-5 h-5 flex items-center justify-center font-bold">{count}</span> : null; })()}
-              </Button>
-            )}
-            {vendors.some(v => v.order_type === 'online') && (
-              <Button variant={view === 'online' ? 'default' : 'outline'} onClick={() => setView('online')}>
-                <Globe className="w-4 h-4 mr-1" />
-                Online Order
-                {(() => { const count = Object.entries(carts).filter(([vid]) => vendors.find(v => v.id === vid)?.order_type === 'online').reduce((sum, [, cart]) => sum + cart.length, 0); return count > 0 ? <span className="ml-1 bg-white text-primary rounded-full text-xs w-5 h-5 flex items-center justify-center font-bold">{count}</span> : null; })()}
-              </Button>
-            )}
-            {vendors.some(v => v.order_type === 'instore') && (
-              <Button variant={view === 'instore' ? 'default' : 'outline'} onClick={() => setView('instore')}>
-                <ShoppingBasket className="w-4 h-4 mr-1" />
-                In-Store
-                {(() => { const count = Object.entries(carts).filter(([vid]) => vendors.find(v => v.id === vid)?.order_type === 'instore').reduce((sum, [, cart]) => sum + cart.length, 0); return count > 0 ? <span className="ml-1 bg-white text-primary rounded-full text-xs w-5 h-5 flex items-center justify-center font-bold">{count}</span> : null; })()}
-              </Button>
-            )}
+            <Button variant={view === 'cart' ? 'default' : 'outline'} onClick={() => setView('cart')}>
+              <ShoppingCart className="w-4 h-4 mr-1" />
+              New Order
+              {(() => { const count = Object.values(carts).reduce((sum, cart) => sum + cart.length, 0); return count > 0 ? <span className="ml-1 bg-white text-primary rounded-full text-xs w-5 h-5 flex items-center justify-center font-bold">{count}</span> : null; })()}
+            </Button>
           </div>
         }
       />
@@ -703,37 +698,6 @@ Address: ${loc?.address || '—'}</p>
         onEdit={editDraftOrder} 
         onDelete={setDeleteDialog} 
       />
-      ) : view === 'online' ? (
-        <OnlineShoppingList
-          locations={locations}
-          vendors={vendors}
-          items={items}
-          locInv={locInv}
-          selectedLocation={selectedLocation}
-          selectedVendor={selectedVendor}
-          carts={Object.fromEntries(Object.entries(carts).filter(([vid]) => {
-            const v = vendors.find(v => v.id === vid);
-            return v?.order_type === 'online';
-          }))}
-          onSelectLocation={setSelectedLocation}
-          onSelectVendor={setSelectedVendor}
-          onAddToCart={addToCart}
-          onUpdateQty={updateCartQty}
-          onRemove={removeFromCart}
-          onClearCart={clearCart}
-          onFillToPar={fillToPars}
-        />
-      ) : view === 'instore' ? (
-        <InStoreShoppingList
-          vendors={vendors}
-          carts={Object.fromEntries(Object.entries(carts).filter(([vid]) => {
-            const v = vendors.find(v => v.id === vid);
-            return v?.order_type === 'instore';
-          }))}
-          onUpdateQty={updateCartQty}
-          onRemove={removeFromCart}
-          onClearCart={clearCart}
-        />
       ) : (
         <MultiVendorCart
           locations={locations}

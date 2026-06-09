@@ -6,13 +6,16 @@ const entityNames = [
   'CompanySettings',
   'CommissaryFulfillment',
   'InventoryCount',
+  'InventoryLedger',
   'InventoryItem',
   'InventorySnapshot',
   'Invoice',
   'ItemStorageArea',
+  'ItemVariant',
   'Location',
   'LocationInventory',
   'Order',
+  'ProductGroup',
   'StorageArea',
   'Transfer',
   'User',
@@ -96,6 +99,10 @@ const entityClient = (entityName) => ({
   create: (data) => request(`/api/entities/${entityName}`, {
     method: 'POST',
     body: data
+  }),
+  bulkCreate: (rows = []) => request(`/api/entities/${entityName}/bulk`, {
+    method: 'POST',
+    body: rows
   }),
   update: (id, data) => request(`/api/entities/${entityName}/${encodeURIComponent(id)}`, {
     method: 'PATCH',

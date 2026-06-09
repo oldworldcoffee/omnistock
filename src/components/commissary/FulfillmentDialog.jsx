@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,21 +11,52 @@ export default function FulfillmentDialog({ open, onOpenChange, order, commissar
   const [fulfillmentItems, setFulfillmentItems] = useState([]);
   const [notes, setNotes] = useState('');
   const [fulfilling, setFulfilling] = useState(false);
-  const [splitOption, setSplitOption] = useState('close'); // 'close' or 'split'
+  const [splitOption, setSplitOption] = useState('close');
+  const [variants, setVariants] = useState([]);
+
+  useEffect(() => {
+    if (open) {
+      base44.entities.ItemVariant.list().then(setVariants);
+    }
+  }, [open]);
 
   useEffect(() => {
     if (order && open) {
-      // Initialize fulfillment items from order items
-      setFulfillmentItems(
-        (order.items || []).map(item => ({
-          ...item,
-          quantity_fulfilled: item.quantity_ordered,
-          notes: ''
-        }))
-      );
+      // Expand items with variant_quantities into separate line items
+      const expandedItems = (order.items || []).flatMap(item => {
+        const hasVariantBreakdown = item.variant_quantities && Object.keys(item.variant_quantities).length > 0;
+        
+        if (hasVariantBreakdown) {
+          // Expand variant quantities into separate items
+          return Object.entries(item.variant_quantities)
+            .filter(([, qty]) => qty > 0)
+            .map(([variantId, qty]) => {
+              const variant = variants.find(v => v.id === variantId);
+              const baseName = item.item_name.replace(/\s*\([^()]+\)$/, '');
+              return {
+                ...item,
+                variant_id: variantId,
+                item_name: variant ? `${baseName} (${variant.variant_name})` : `${baseName} (${variantId})`,
+                quantity_ordered: qty,
+                quantity_fulfilled: qty,
+                notes: ''
+              };
+            });
+        } else {
+          // Single item or single variant
+          const variant = item.variant_id ? variants.find(v => v.id === item.variant_id) : null;
+          return [{
+            ...item,
+            item_name: variant ? `${item.item_name.replace(/\s*\([^()]+\)$/, '')} (${variant.variant_name})` : item.item_name,
+            quantity_fulfilled: item.quantity_ordered,
+            notes: ''
+          }];
+        }
+      });
+      setFulfillmentItems(expandedItems);
       setNotes('');
     }
-  }, [order, open]);
+  }, [order, open, variants]);
 
   const updateItem = (idx, field, value) => {
     setFulfillmentItems(prev =>
@@ -90,7 +121,7 @@ export default function FulfillmentDialog({ open, onOpenChange, order, commissar
               </thead>
               <tbody className="divide-y divide-border">
                 {fulfillmentItems.map((item, idx) => (
-                  <tr key={idx} className="hover:bg-muted/30">
+                  <tr key={item.item_id + (item.variant_id || '') + idx} className="hover:bg-muted/30">
                     <td className="px-3 py-2.5 font-medium">{item.item_name}</td>
                     <td className="px-3 py-2.5 text-right">{item.quantity_ordered} {item.unit_of_measure}</td>
                     <td className="px-3 py-2.5 text-right">

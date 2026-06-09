@@ -20,10 +20,11 @@
     "status": {
       "type": "string",
       "enum": [
+        "draft",
         "in_progress",
         "submitted"
       ],
-      "default": "in_progress"
+      "default": "draft"
     },
     "categories": {
       "type": "array",
@@ -55,6 +56,32 @@
           "counted_quantity": {
             "type": "number"
           },
+          "variant_id": {
+            "type": "string"
+          },
+          "variant_name": {
+            "type": "string"
+          },
+          "count_units": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "multiplier": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "unit_inputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
           "area_counts": {
             "type": "array",
             "description": "Per storage area breakdown",
@@ -69,6 +96,12 @@
                 },
                 "quantity": {
                   "type": "number"
+                },
+                "unit_inputs": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
                 }
               }
             }

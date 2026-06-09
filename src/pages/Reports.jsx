@@ -68,7 +68,7 @@ export default function Reports() {
     : locInv.reduce((sum, li) => {
         if (selectedLocationId !== 'all' && li.location_id !== selectedLocationId) return sum;
         const item = items.find(i => i.id === li.item_id);
-        return sum + (li.on_hand_quantity || 0) * (item?.unit_cost || 0);
+        return sum + (Number.isFinite(Number(li.inventory_value)) ? Number(li.inventory_value) : (li.on_hand_quantity || 0) * (item?.unit_cost || 0));
       }, 0);
 
   const lowStockItems = locInv.filter(li => {
@@ -89,7 +89,7 @@ export default function Reports() {
           .filter(li => li.location_id === loc.id)
           .reduce((sum, li) => {
             const item = items.find(i => i.id === li.item_id);
-            return sum + (li.on_hand_quantity || 0) * (item?.unit_cost || 0);
+            return sum + (Number.isFinite(Number(li.inventory_value)) ? Number(li.inventory_value) : (li.on_hand_quantity || 0) * (item?.unit_cost || 0));
           }, 0);
     return { name: loc.name, value: parseFloat(val.toFixed(2)), color: COLORS[idx % COLORS.length] };
   });
@@ -108,7 +108,7 @@ export default function Reports() {
           .filter(li => catItems.some(i => i.id === li.item_id))
           .reduce((sum, li) => {
             const item = items.find(i => i.id === li.item_id);
-            return sum + (li.on_hand_quantity || 0) * (item?.unit_cost || 0);
+            return sum + (Number.isFinite(Number(li.inventory_value)) ? Number(li.inventory_value) : (li.on_hand_quantity || 0) * (item?.unit_cost || 0));
           }, 0);
     return { name: cat, value: parseFloat(val.toFixed(2)), color: COLORS[idx % COLORS.length] };
   });

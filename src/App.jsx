@@ -1,4 +1,4 @@
-import { Toaster } from "@/components/ui/toaster"
+import { Toaster } from "sonner"
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClientInstance } from '@/lib/query-client'
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
@@ -26,6 +26,9 @@ import Vendors from '@/pages/Vendors';
 import Locations from '@/pages/Locations';
 import Reports from '@/pages/Reports';
 import Settings from '@/pages/Settings';
+import VendorOrderView from '@/pages/VendorOrderView';
+import OnlineOrders from '@/pages/OnlineOrders';
+import InStoreOrders from '@/pages/InStoreOrders';
 
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, navigateToLogin } = useAuth();
@@ -58,6 +61,8 @@ const AuthenticatedApp = () => {
           <Route path="/counts" element={<InventoryCounts />} />
           <Route path="/orders" element={<VendorOrders />} />
           <Route path="/commissary" element={<Commissary />} />
+          <Route path="/online-orders" element={<OnlineOrders />} />
+          <Route path="/instore-orders" element={<InStoreOrders />} />
           <Route path="/transfers" element={<Transfers />} />
           <Route path="/invoices" element={<Invoices />} />
           <Route path="/vendors" element={<Vendors />} />
@@ -74,6 +79,10 @@ const AuthenticatedApp = () => {
           </Route>
         </Route>
       </Route>
+      {/* Public vendor order view (no auth required) */}
+      <Route path="/vendor/order" element={<VendorOrderView />} />
+      {/* Public vendor order view (no auth required) */}
+      <Route path="/vendor/order" element={<VendorOrderView />} />
       <Route path="*" element={<PageNotFound />} />
     </Routes>
   );

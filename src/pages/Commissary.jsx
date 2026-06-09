@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useAuth } from '@/lib/AuthContext';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Plus, Store, CheckCircle, Truck, Eye, Package, XCircle, Printer } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,9 +15,11 @@ import { toast } from 'sonner';
 import FulfillmentDialog from '@/components/commissary/FulfillmentDialog';
 
 export default function Commissary() {
-  const { canAccessLocation } = useAuth();
+  const { canAccessLocation, getManagedCommissaryLocationIds, companyId } = useAuth();
   const [locations, setLocations] = useState([]);
+  const [vendors, setVendors] = useState([]);
   const [items, setItems] = useState([]);
+  const [variants, setVariants] = useState([]);
   const [locInv, setLocInv] = useState([]);
   const [orders, setOrders] = useState([]);
   const [fulfillments, setFulfillments] = useState([]);
@@ -30,16 +33,21 @@ export default function Commissary() {
   const [activeTab, setActiveTab] = useState('outgoing');
   const [backstockDialog, setBackstockDialog] = useState(null);
   const [backstockNote, setBackstockNote] = useState('');
+  const [selectedCommissaryId, setSelectedCommissaryId] = useState('');
 
   const load = () => Promise.all([
     base44.entities.Location.list(),
+    base44.entities.Vendor.filter({ is_commissary: true }),
     base44.entities.InventoryItem.filter({ is_commissary_item: true, is_active: true }),
+    base44.entities.ItemVariant.list(),
     base44.entities.LocationInventory.list(),
     base44.entities.Order.filter({ type: 'commissary' }, '-created_date', 50),
     base44.entities.CommissaryFulfillment.list('-fulfillment_date', 50),
-  ]).then(([locs, itms, linv, ords, fuls]) => {
+  ]).then(([locs, vnds, itms, variants, linv, ords, fuls]) => {
     setLocations(locs.filter(l => canAccessLocation(l.id)));
+    setVendors(vnds);
     setItems(itms);
+    setVariants(variants);
     setLocInv(linv);
     setOrders(ords);
     setFulfillments(fuls);
@@ -50,32 +58,95 @@ export default function Commissary() {
     load(); 
   }, []);
 
+  // Auto-select commissary if only one managed, else require selection
+  const managedCommissaryIds = getManagedCommissaryLocationIds();
+  const commissaryLocs = locations.filter(l => l.type === 'commissary' && managedCommissaryIds.includes(l.id));
+
+  useEffect(() => {
+    if (commissaryLocs.length === 1 && !selectedCommissaryId) {
+      setSelectedCommissaryId(commissaryLocs[0].id);
+    }
+  }, [commissaryLocs.length]);
+
   useEffect(() => {
     if (viewDialog) {
       markAsViewed(viewDialog);
     }
   }, [viewDialog]);
 
-  const commissaryLoc = locations.find(l => l.type === 'commissary');
   const regularLocs = locations.filter(l => l.type !== 'commissary');
 
+  // Find all vendor IDs that represent this commissary location.
+  // Includes: vendors with commissioned_location_id set, AND legacy commissary vendors
+  // that share the same name/email (auto-created before the location link existed).
+  const commissaryLoc = locations.find(l => l.id === selectedCommissaryId);
+  const commissaryVendorIds = selectedCommissaryId
+    ? vendors
+        .filter(v => v.is_commissary && (
+          v.commissioned_location_id === selectedCommissaryId ||
+          // Legacy match: same email or name as the commissary location
+          (commissaryLoc && (v.email === commissaryLoc.email || v.name === commissaryLoc.name))
+        ))
+        .map(v => v.id)
+    : [];
+
+  // Filter orders/fulfillments to selected commissary — show empty state if none selected
+  // Include orders without vendor_id (direct commissary orders)
+  const filteredOrders = selectedCommissaryId
+    ? orders.filter(o => 
+        o.type === 'commissary' && 
+        (commissaryVendorIds.includes(o.vendor_id) || o.vendor_id === selectedCommissaryId || !o.vendor_id)
+      )
+    : [];
+  const filteredFulfillments = selectedCommissaryId
+    ? fulfillments.filter(f => f.commissary_location_id === selectedCommissaryId)
+    : [];
+
   const buildCart = (locationId) => {
-    return items.map(item => {
-      const li = locInv.find(l => l.location_id === locationId && l.item_id === item.id);
-      const onHand = li?.on_hand_quantity || 0;
-      const par = li?.par_level || 0;
-      const qty = Math.max(0, par - onHand);
-      return {
-        item_id: item.id,
-        item_name: item.name,
-        unit_of_measure: item.unit_of_measure,
-        quantity_ordered: qty,
-        unit_cost: item.commissary_price || item.unit_cost || 0,
-        total_cost: qty * (item.commissary_price || item.unit_cost || 0),
-        on_hand: onHand,
-        par_level: par,
-      };
+    const cartItems = [];
+    
+    items.forEach(item => {
+      const itemVariants = variants.filter(v => v.item_id === item.id);
+      
+      if (itemVariants.length > 0) {
+        // Item has variants - create a row for each variant
+        itemVariants.forEach(variant => {
+          const li = locInv.find(l => l.location_id === locationId && l.item_id === item.id);
+          const onHand = li?.on_hand_quantity || 0;
+          const par = li?.par_level || 0;
+          const qty = Math.max(0, par - onHand);
+          cartItems.push({
+            item_id: item.id,
+            variant_id: variant.id,
+            item_name: `${item.name} (${variant.variant_name})`,
+            unit_of_measure: item.unit_of_measure,
+            quantity_ordered: qty,
+            unit_cost: variant.unit_cost || item.commissary_price || item.unit_cost || 0,
+            total_cost: qty * (variant.unit_cost || item.commissary_price || item.unit_cost || 0),
+            on_hand: onHand,
+            par_level: par,
+          });
+        });
+      } else {
+        // No variants - standard item
+        const li = locInv.find(l => l.location_id === locationId && l.item_id === item.id);
+        const onHand = li?.on_hand_quantity || 0;
+        const par = li?.par_level || 0;
+        const qty = Math.max(0, par - onHand);
+        cartItems.push({
+          item_id: item.id,
+          item_name: item.name,
+          unit_of_measure: item.unit_of_measure,
+          quantity_ordered: qty,
+          unit_cost: item.commissary_price || item.unit_cost || 0,
+          total_cost: qty * (item.commissary_price || item.unit_cost || 0),
+          on_hand: onHand,
+          par_level: par,
+        });
+      }
     });
+    
+    return cartItems;
   };
 
   const openNewOrder = () => {
@@ -102,6 +173,7 @@ export default function Commissary() {
       type: 'commissary',
       status: 'sent',
       location_id: cartForm.location_id,
+      company_id: companyId,
       items: orderItems,
       total_amount: orderItems.reduce((s, i) => s + i.total_cost, 0),
       order_number: `CO-${Date.now().toString().slice(-6)}`,
@@ -121,13 +193,27 @@ export default function Commissary() {
     setViewDialog(null);
   };
 
+  const markAsViewedRef = useRef(null);
   const markAsViewed = async (order) => {
-    if (order.status === 'sent') {
+    // Prevent duplicate calls
+    if (markAsViewedRef.current) return;
+    if (order.status !== 'sent') return;
+    
+    markAsViewedRef.current = true;
+    try {
       await base44.entities.Order.update(order.id, {
         status: 'viewed',
         viewed_at: new Date().toISOString(),
       });
       await load();
+    } catch (error) {
+      if (error.message?.includes('Rate limit')) {
+        console.warn('Rate limited, skipping viewed status update');
+      } else {
+        throw error;
+      }
+    } finally {
+      markAsViewedRef.current = false;
     }
   };
 
@@ -143,35 +229,43 @@ export default function Commissary() {
   const markBackstock = async () => {
     if (!backstockDialog || !backstockNote.trim()) return;
     
-    // Update commissary order
-    await base44.entities.Order.update(backstockDialog.id, {
-      status: 'backstocked',
-      backstock_note: backstockNote.trim(),
-    });
-    
-    // Find and update related vendor orders (draft or sent) for the same location
-    const allOrders = await base44.entities.Order.list('-created_date', 100);
-    const relatedVendorOrders = allOrders.filter(vo => 
-      (vo.type === 'vendor') &&
-      vo.location_id === backstockDialog.location_id &&
-      (vo.status === 'draft' || vo.status === 'sent' || vo.status === 'viewed') &&
-      vo.items?.some(vi => backstockDialog.items?.some(ci => ci.item_id === vi.item_id))
-    );
-    
-    for (const relatedOrder of relatedVendorOrders) {
-      const existingNote = relatedOrder.notes || '';
-      const backstockText = `\n\n[COMMISSARY BACKSTOCK - ${format(new Date(), 'MMM d, yyyy')}] ${backstockNote.trim()}`;
-      if (!existingNote.includes('[COMMISSARY BACKSTOCK')) {
-        await base44.entities.Order.update(relatedOrder.id, {
-          notes: existingNote + backstockText
-        });
-        toast.success(`Vendor order ${relatedOrder.order_number} updated with backstock note`);
+    try {
+      // Update commissary order
+      await base44.entities.Order.update(backstockDialog.id, {
+        status: 'backstocked',
+        backstock_note: backstockNote.trim(),
+      });
+      
+      // Find and update related vendor orders (draft or sent) for the same location
+      const allOrders = await base44.entities.Order.list('-created_date', 100);
+      const relatedVendorOrders = allOrders.filter(vo => 
+        (vo.type === 'vendor') &&
+        vo.location_id === backstockDialog.location_id &&
+        (vo.status === 'draft' || vo.status === 'sent' || vo.status === 'viewed') &&
+        vo.items?.some(vi => backstockDialog.items?.some(ci => ci.item_id === vi.item_id))
+      );
+      
+      for (const relatedOrder of relatedVendorOrders) {
+        const existingNote = relatedOrder.notes || '';
+        const backstockText = `\n\n[COMMISSARY BACKSTOCK - ${format(new Date(), 'MMM d, yyyy')}] ${backstockNote.trim()}`;
+        if (!existingNote.includes('[COMMISSARY BACKSTOCK')) {
+          await base44.entities.Order.update(relatedOrder.id, {
+            notes: existingNote + backstockText
+          });
+          toast.success(`Vendor order ${relatedOrder.order_number} updated with backstock note`);
+        }
+      }
+      
+      await load();
+      setBackstockDialog(null);
+      setBackstockNote('');
+    } catch (error) {
+      if (error.message?.includes('Rate limit')) {
+        toast.error('Rate limited. Please wait a moment and try again.');
+      } else {
+        throw error;
       }
     }
-    
-    await load();
-    setBackstockDialog(null);
-    setBackstockNote('');
   };
 
   const clearBackstock = async (order) => {
@@ -190,27 +284,45 @@ export default function Commissary() {
     window.print();
   };
 
+  const isMobile = useIsMobile();
+
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className={isMobile ? "p-4 max-w-full" : "p-6 max-w-7xl mx-auto"}>
+      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded text-xs font-mono">
+        <strong>VARIANTS DEBUG:</strong> Total variants loaded: {variants.length} | Items: {items.length} | Items with is_commissary_item: {items.filter(i => i.is_commissary_item).length}
+      </div>
       <PageHeader
         title="Commissary"
         subtitle="Internal orders and fulfillment between commissary and locations"
         actions={
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setActiveTab('outgoing')}>
-              <Truck className="w-4 h-4 mr-1" /> Outgoing Orders
-            </Button>
-            <Button variant="outline" onClick={() => setActiveTab('fulfillments')}>
-              <Package className="w-4 h-4 mr-1" /> Fulfillments
-            </Button>
-            <Button onClick={openNewOrder}><Plus className="w-4 h-4 mr-1" />Place Order</Button>
-          </div>
+          <Button onClick={openNewOrder}><Plus className="w-4 h-4 mr-1" />Place Order</Button>
         }
       />
 
-      {!commissaryLoc && (
+      {commissaryLocs.length === 0 && (
         <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-700">
-          No commissary location set up yet. <a href="/locations" className="underline">Add a commissary location</a> to enable commissary ordering.
+          No commissary access. Set up a commissary location and assign manage permissions to get started.
+        </div>
+      )}
+
+      {commissaryLocs.length > 1 && (
+        <div className="mb-4 flex items-center gap-3">
+          <label className="text-sm font-medium text-muted-foreground whitespace-nowrap">Commissary:</label>
+          <div className="flex gap-2 flex-wrap">
+            {commissaryLocs.map(c => (
+              <button
+                key={c.id}
+                onClick={() => setSelectedCommissaryId(c.id)}
+                className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors ${
+                  selectedCommissaryId === c.id
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-border hover:bg-muted text-foreground'
+                }`}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -221,105 +333,121 @@ export default function Commissary() {
         </TabsList>
 
         <TabsContent value="outgoing" className="mt-4">
-          <div className="bg-card border border-border rounded-xl overflow-hidden">
-        {loading ? (
-          <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50">
-              <tr>
-                {['Order #', 'Location', 'Items', 'Total', 'Status', 'Date', ''].map(h => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {orders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No pending orders.</td></tr>
-              ) : orders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').map(o => (
-                <tr key={o.id} className="hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3 font-medium font-mono">
-                    {o.order_number}
-                    {o.notes?.includes('Split from') && (
-                      <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split Order</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">{locName(o.location_id)}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{o.items?.length || 0}</td>
-                  <td className="px-4 py-3 font-medium">${(o.total_amount || 0).toFixed(2)}</td>
-                  <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
-                  <td className="px-4 py-3 text-muted-foreground text-xs">{format(new Date(o.created_date), 'MMM d, h:mm a')}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setViewDialog(o)}>
-                        <Eye className="w-3.5 h-3.5" />
-                      </Button>
-                      {o.status === 'fulfilled' && (
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPrintDialog(o)}>
-                          <Printer className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                      {(o.status === 'sent' || o.status === 'viewed' || o.status === 'partial') && (
-                        <>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-green-600" onClick={() => fulfillOrder(o)}>
-                            <CheckCircle className="w-3.5 h-3.5" />
-                          </Button>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => setCancelDialog(o)}>
-                            <XCircle className="w-3.5 h-3.5" />
-                          </Button>
-                        </>
-                      )}
+          {loading ? (
+            <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
+          ) : isMobile ? (
+            <div className="space-y-3">
+              {filteredOrders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').length === 0 ? (
+                <div className="bg-card border border-border rounded-xl px-4 py-8 text-center text-muted-foreground text-sm">{selectedCommissaryId ? 'No pending orders.' : 'Select a commissary to view orders.'}</div>
+              ) : filteredOrders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').map(o => (
+                <div key={o.id} className="bg-card border border-border rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-mono font-semibold text-sm">{o.order_number}{o.notes?.includes('Split from') && <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split</span>}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{locName(o.location_id)} · {format(new Date(o.created_date), 'MMM d, h:mm a')}</p>
                     </div>
-                  </td>
-                </tr>
+                    <StatusBadge status={o.status} />
+                  </div>
+                  <div className="flex items-center justify-between text-sm border-t border-border pt-2">
+                    <span className="text-muted-foreground">{o.items?.length || 0} items</span>
+                    <span className="font-semibold">${(o.total_amount || 0).toFixed(2)}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" className="flex-1 h-8 text-xs" onClick={() => setViewDialog(o)}><Eye className="w-3.5 h-3.5 mr-1" />View</Button>
+                    {(o.status === 'sent' || o.status === 'viewed' || o.status === 'partial') && <>
+                      <Button variant="outline" size="sm" className="flex-1 h-8 text-xs text-green-600" onClick={() => fulfillOrder(o)}><CheckCircle className="w-3.5 h-3.5 mr-1" />Fulfill</Button>
+                      <Button variant="outline" size="sm" className="h-8 w-8 text-red-600 px-0" onClick={() => setCancelDialog(o)}><XCircle className="w-3.5 h-3.5" /></Button>
+                    </>}
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>{['Order #', 'Location', 'Items', 'Total', 'Status', 'Date', ''].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>)}</tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {filteredOrders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').length === 0 ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">{selectedCommissaryId ? 'No pending orders.' : 'Select a commissary to view orders.'}</td></tr>
+                  ) : filteredOrders.filter(o => o.status !== 'fulfilled' && o.status !== 'cancelled' && o.status !== 'received').map(o => (
+                    <tr key={o.id} className="hover:bg-muted/30 transition-colors">
+                      <td className="px-4 py-3 font-medium font-mono">{o.order_number}{o.notes?.includes('Split from') && <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split Order</span>}</td>
+                      <td className="px-4 py-3">{locName(o.location_id)}</td>
+                      <td className="px-4 py-3 text-muted-foreground">{o.items?.length || 0}</td>
+                      <td className="px-4 py-3 font-medium">${(o.total_amount || 0).toFixed(2)}</td>
+                      <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
+                      <td className="px-4 py-3 text-muted-foreground text-xs">{format(new Date(o.created_date), 'MMM d, h:mm a')}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-1">
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setViewDialog(o)}><Eye className="w-3.5 h-3.5" /></Button>
+                          {o.status === 'fulfilled' && <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPrintDialog(o)}><Printer className="w-3.5 h-3.5" /></Button>}
+                          {(o.status === 'sent' || o.status === 'viewed' || o.status === 'partial') && <>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-green-600" onClick={() => fulfillOrder(o)}><CheckCircle className="w-3.5 h-3.5" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-red-600" onClick={() => setCancelDialog(o)}><XCircle className="w-3.5 h-3.5" /></Button>
+                          </>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="fulfillments" className="mt-4">
-          <div className="bg-card border border-border rounded-xl overflow-hidden">
-            {loading ? (
-              <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
-            ) : (
+          {loading ? (
+            <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
+          ) : isMobile ? (
+            <div className="space-y-3">
+              {filteredFulfillments.length === 0 ? (
+                <div className="bg-card border border-border rounded-xl px-4 py-8 text-center text-muted-foreground text-sm">{selectedCommissaryId ? 'No fulfillments yet.' : 'Select a commissary to view fulfillments.'}</div>
+              ) : filteredFulfillments.map(f => (
+                <div key={f.id} className="bg-card border border-border rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-mono font-semibold text-sm">{f.order_number}{f.is_split_invoice && <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split</span>}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{locName(f.retail_location_id)}</p>
+                    </div>
+                    <StatusBadge status={f.status} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs border-t border-border pt-2">
+                    <div><p className="text-muted-foreground">Items</p><p className="font-medium mt-0.5">{f.items?.length || 0}</p></div>
+                    <div><p className="text-muted-foreground">Total</p><p className="font-medium mt-0.5">${(f.items || []).reduce((s, i) => s + (i.total_cost || 0), 0).toFixed(2)}</p></div>
+                    <div><p className="text-muted-foreground">Fulfilled</p><p className="font-medium mt-0.5">{f.fulfillment_date ? format(new Date(f.fulfillment_date), 'MMM d') : '—'}</p></div>
+                    <div><p className="text-muted-foreground">From</p><p className="font-medium mt-0.5">{locName(f.commissary_location_id)}</p></div>
+                  </div>
+                  <Button variant="outline" size="sm" className="w-full h-8 text-xs" onClick={() => setPrintDialog(f)}><Printer className="w-3.5 h-3.5 mr-1" />Print Invoice</Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-muted/50">
-                  <tr>
-                    {['Order #', 'Retail Location', 'Items', 'Total', 'Status', 'Fulfilled', 'Commissary', ''].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>
-                    ))}
-                  </tr>
+                  <tr>{['Order #', 'Retail Location', 'Items', 'Total', 'Status', 'Fulfilled', 'Commissary', ''].map(h => <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>)}</tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {fulfillments.length === 0 ? (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No fulfillments yet.</td></tr>
-                  ) : fulfillments.map(f => (
+                  {filteredFulfillments.length === 0 ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">{selectedCommissaryId ? 'No fulfillments yet.' : 'Select a commissary to view fulfillments.'}</td></tr>
+                  ) : filteredFulfillments.map(f => (
                     <tr key={f.id} className="hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-3 font-medium font-mono">
-                        {f.order_number}
-                        {f.is_split_invoice && (
-                          <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split</span>
-                        )}
-                      </td>
+                      <td className="px-4 py-3 font-medium font-mono">{f.order_number}{f.is_split_invoice && <span className="ml-2 text-[10px] bg-pink-100 text-pink-700 px-1 rounded">Split</span>}</td>
                       <td className="px-4 py-3">{locName(f.retail_location_id)}</td>
                       <td className="px-4 py-3 text-muted-foreground">{f.items?.length || 0}</td>
                       <td className="px-4 py-3 font-medium">${(f.items || []).reduce((s, i) => s + (i.total_cost || 0), 0).toFixed(2)}</td>
                       <td className="px-4 py-3"><StatusBadge status={f.status} /></td>
                       <td className="px-4 py-3 text-muted-foreground text-xs">{f.fulfillment_date ? format(new Date(f.fulfillment_date), 'MMM d, h:mm a') : '—'}</td>
                       <td className="px-4 py-3 text-muted-foreground">{locName(f.commissary_location_id)}</td>
-                      <td className="px-4 py-3">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPrintDialog(f)}>
-                          <Printer className="w-3.5 h-3.5" />
-                        </Button>
-                      </td>
-                      </tr>
+                      <td className="px-4 py-3"><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPrintDialog(f)}><Printer className="w-3.5 h-3.5" /></Button></td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
-            )}
-          </div>
+            </div>
+          )}
         </TabsContent>
       </Tabs>
 
@@ -337,6 +465,13 @@ export default function Commissary() {
             </div>
             {cartForm.items.length > 0 && (
               <div>
+                <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded text-xs font-mono">
+                  <strong>DEBUG:</strong><br/>
+                  Variants in DB: {variants.length}<br/>
+                  Cart items: {cartForm.items.length}<br/>
+                  Items with variant_id: {cartForm.items.filter(i => i.variant_id).length}<br/>
+                  First item: {cartForm.items[0]?.item_name}
+                </div>
                 <Label className="mb-2 block">Items (auto-filled to par, commissary pricing)</Label>
                 <div className="border border-border rounded-lg overflow-hidden">
                   <table className="w-full text-sm">
@@ -349,7 +484,7 @@ export default function Commissary() {
                     </thead>
                     <tbody className="divide-y divide-border">
                       {cartForm.items.map((row, idx) => (
-                        <tr key={row.item_id} className="hover:bg-muted/20">
+                        <tr key={row.item_id + (row.variant_id || '')} className="hover:bg-muted/20">
                           <td className="px-3 py-2 font-medium text-xs">{row.item_name}</td>
                           <td className="px-3 py-2 text-xs text-muted-foreground">{row.on_hand}</td>
                           <td className="px-3 py-2 text-xs text-muted-foreground">{row.par_level}</td>
@@ -391,18 +526,61 @@ export default function Commissary() {
               <div className="border border-border rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/50">
-                    <tr>{['Item', 'Qty', 'UOM', 'Price', 'Total'].map(h => <th key={h} className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">{h}</th>)}</tr>
+                    <tr>
+                      {['Item', 'Qty', 'UOM', 'Price', 'Total'].map(h => (
+                        <th key={h} className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">{h}</th>
+                      ))}
+                    </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {viewDialog.items?.map((item, i) => (
-                      <tr key={i}>
-                        <td className="px-3 py-2">{item.item_name}</td>
-                        <td className="px-3 py-2">{item.quantity_ordered}</td>
-                        <td className="px-3 py-2 text-muted-foreground">{item.unit_of_measure}</td>
-                        <td className="px-3 py-2">${(item.unit_cost || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 font-medium">${(item.total_cost || 0).toFixed(2)}</td>
-                      </tr>
-                    ))}
+                    {viewDialog.items?.map((item, i) => {
+                      const hasVariantBreakdown = item.variant_quantities && Object.keys(item.variant_quantities).length > 0;
+                      const itemVariants = hasVariantBreakdown 
+                        ? Object.entries(item.variant_quantities)
+                            .map(([variantId, qty]) => {
+                              const variant = variants.find(v => v.id === variantId);
+                              return { variantId, qty, variant };
+                            })
+                            .filter(v => v.qty > 0)
+                        : [];
+
+                      const hasSingleVariant = item.variant_id && !hasVariantBreakdown;
+                      const singleVariant = hasSingleVariant ? variants.find(v => v.id === item.variant_id) : null;
+
+                      return (
+                        <React.Fragment key={i}>
+                          <tr>
+                            <td className="px-3 py-2">
+                              {item.item_name}
+                              {hasSingleVariant && singleVariant && (
+                                <span className="ml-2 text-xs text-primary font-semibold">({singleVariant.variant_name})</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap">{item.quantity_ordered}</td>
+                            <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{item.unit_of_measure}</td>
+                            <td className="px-3 py-2 whitespace-nowrap">${(item.unit_cost || 0).toFixed(2)}</td>
+                            <td className="px-3 py-2 font-medium whitespace-nowrap">${(item.total_cost || 0).toFixed(2)}</td>
+                          </tr>
+                          {itemVariants.length > 0 && (
+                            <tr className="bg-muted/20">
+                              <td colSpan={5} className="px-6 py-2.5">
+                                <div className="text-xs space-y-1.5">
+                                  <p className="font-medium text-muted-foreground mb-2">Variant Breakdown:</p>
+                                  <div className="grid grid-cols-2 gap-3 ml-2">
+                                    {itemVariants.map(({ variantId, qty, variant }) => (
+                                      <div key={variantId} className="flex items-center justify-between">
+                                        <span className="text-muted-foreground">{variant?.variant_name || 'Unknown'}</span>
+                                        <span className="font-medium">× {qty}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -472,7 +650,7 @@ export default function Commissary() {
         open={!!fulfillmentDialog}
         onOpenChange={() => setFulfillmentDialog(null)}
         order={fulfillmentDialog}
-        commissaryLocationId={commissaryLoc?.id}
+        commissaryLocationId={selectedCommissaryId || commissaryLoc?.id}
         onFulfilled={handleFulfilled}
       />
 
@@ -539,15 +717,54 @@ export default function Commissary() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {printDialog.items?.map((item, i) => (
-                      <tr key={i}>
-                        <td className="px-4 py-3">{item.item_name}</td>
-                        <td className="px-4 py-3">{item.quantity_fulfilled || item.quantity_ordered}</td>
-                        <td className="px-4 py-3 text-muted-foreground">{item.unit_of_measure}</td>
-                        <td className="px-4 py-3">${(item.unit_cost || 0).toFixed(2)}</td>
-                        <td className="px-4 py-3 font-medium">${(item.total_cost || 0).toFixed(2)}</td>
-                      </tr>
-                    ))}
+                    {printDialog.items?.map((item, i) => {
+                      const hasVariantBreakdown = item.variant_quantities && Object.keys(item.variant_quantities).length > 0;
+                      const itemVariants = hasVariantBreakdown 
+                        ? Object.entries(item.variant_quantities)
+                            .map(([variantId, qty]) => {
+                              const variant = variants.find(v => v.id === variantId);
+                              return { variantId, qty, variant };
+                            })
+                            .filter(v => v.qty > 0)
+                        : [];
+                      
+                      const hasSingleVariant = item.variant_id && !hasVariantBreakdown;
+                      const singleVariant = hasSingleVariant ? variants.find(v => v.id === item.variant_id) : null;
+                      
+                      return (
+                        <React.Fragment key={i}>
+                          <tr>
+                            <td className="px-4 py-3">
+                              {item.item_name}
+                              {hasSingleVariant && singleVariant && (
+                                <span className="ml-2 text-xs text-primary font-semibold">({singleVariant.variant_name})</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">{item.quantity_fulfilled || item.quantity_ordered}</td>
+                            <td className="px-4 py-3 text-muted-foreground">{item.unit_of_measure}</td>
+                            <td className="px-4 py-3">${(item.unit_cost || 0).toFixed(2)}</td>
+                            <td className="px-4 py-3 font-medium">${(item.total_cost || 0).toFixed(2)}</td>
+                          </tr>
+                          {itemVariants.length > 0 && (
+                            <tr className="bg-muted/20">
+                              <td colSpan={5} className="px-6 py-2.5">
+                                <div className="text-xs space-y-1.5">
+                                  <p className="font-medium text-muted-foreground mb-2">Variant Breakdown:</p>
+                                  <div className="grid grid-cols-2 gap-3 ml-2">
+                                    {itemVariants.map(({ variantId, qty, variant }) => (
+                                      <div key={variantId} className="flex items-center justify-between">
+                                        <span className="text-muted-foreground">{variant?.variant_name || 'Unknown'}</span>
+                                        <span className="font-medium">× {qty}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                   <tfoot className="bg-muted/50">
                     <tr>
